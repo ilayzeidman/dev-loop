@@ -39,7 +39,7 @@ from .config import (
     STARTER_SCENARIO_NAME,
     HarnessConfig,
 )
-from .runs import list_runs
+from .runs import count_runs, list_runs
 
 # Built-in providers and which environment variable / executable name to
 # probe when the user picks one as their default. ``replay`` needs no
@@ -343,13 +343,16 @@ def _check_runs_ledger(repo: Path, cfg: HarnessConfig) -> DoctorCheck:
     runs_dir = (repo / cfg.runs_dir).resolve()
     if not runs_dir.exists():
         return DoctorCheck("ok", "runs_ledger", "no runs yet")
-    runs = list_runs(runs_dir)
-    if not runs:
+    total = count_runs(runs_dir)
+    if not total:
         return DoctorCheck("ok", "runs_ledger", "no runs yet")
-    last = runs[0]
+    latest = list_runs(runs_dir, limit=1)
+    if not latest:
+        return DoctorCheck("ok", "runs_ledger", f"{total} run(s)")
+    last = latest[0]
     return DoctorCheck(
         "ok", "runs_ledger",
-        f"{len(runs)} run(s); latest: {last['task_id']} "
+        f"{total} run(s); latest: {last['task_id']} "
         f"({last.get('final_status') or last.get('status') or '-'})",
     )
 

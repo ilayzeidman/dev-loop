@@ -407,12 +407,80 @@ def test_runs_list_surfaces_goal_and_duration(tmp_path: Path):
     with _server(tmp_path) as (port, _):
         status, body = _get(port, "/api/runs")
         assert status == 200
-        runs = json.loads(body)["runs"]
+        payload = json.loads(body)
+        runs = payload["runs"]
         assert len(runs) == 1
         r = runs[0]
         assert r["goal"] == "ship a delightful UI"
         assert r["duration_seconds"] == 18
         assert r["iterations"] == 1
+        page = payload["pagination"]
+        assert page["total"] == 1
+        assert page["returned"] == 1
+        assert page["has_more"] is False
+
+
+def _write_fake_run_dir(repo: Path, task_id: str) -> None:
+    """Hand-roll a minimal run dir under the default ``.dev-loop/runs/``
+    so the pagination tests don't have to take a dependency on the
+    orchestrator."""
+    d = repo / ".dev-loop" / "runs" / task_id
+    d.mkdir(parents=True)
+    (d / "task_manifest.json").write_text(json.dumps({
+        "task_id": task_id,
+        "status": "completed",
+        "final_status": "passed",
+        "created_at_utc": "2026-05-21T12:00:00Z",
+        "updated_at_utc": "2026-05-21T12:01:00Z",
+        "task_contract": {"implementation_goal": f"goal for {task_id}"},
+    }))
+    (d / "iterations").mkdir()
+
+
+def test_runs_list_paginates_via_limit_and_offset(tmp_path: Path):
+    """``/api/runs?limit=&offset=`` pages newest-first. The first page
+    must include ``has_more=True`` and the second must pick up exactly
+    where the first left off — so the UI's Load-more button can stream
+    the rest of a multi-thousand-entry ledger without re-fetching what
+    it already has."""
+    for i in range(5):
+        _write_fake_run_dir(tmp_path, f"2026010{i + 1}-000000-r{i}")
+    with _server(tmp_path) as (port, _):
+        _, body = _get(port, "/api/runs?limit=2&offset=0")
+        first = json.loads(body)
+        assert [r["task_id"] for r in first["runs"]] == [
+            "20260105-000000-r4", "20260104-000000-r3",
+        ]
+        page1 = first["pagination"]
+        assert page1["limit"] == 2
+        assert page1["offset"] == 0
+        assert page1["returned"] == 2
+        assert page1["total"] == 5
+        assert page1["has_more"] is True
+
+        _, body = _get(port, "/api/runs?limit=2&offset=2")
+        second = json.loads(body)
+        assert [r["task_id"] for r in second["runs"]] == [
+            "20260103-000000-r2", "20260102-000000-r1",
+        ]
+        assert second["pagination"]["has_more"] is True
+
+        _, body = _get(port, "/api/runs?limit=2&offset=4")
+        third = json.loads(body)
+        assert [r["task_id"] for r in third["runs"]] == ["20260101-000000-r0"]
+        assert third["pagination"]["has_more"] is False
+
+
+def test_runs_list_garbage_paging_args_fall_back_to_defaults(tmp_path: Path):
+    """A hand-edited URL with non-numeric paging args must not 500 —
+    the listing is the user's escape hatch back to a working state."""
+    _write_fake_run_dir(tmp_path, "20260521-aaaaaa-demo")
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/runs?limit=abc&offset=-9")
+        assert status == 200
+        payload = json.loads(body)
+        assert len(payload["runs"]) == 1
+        assert payload["pagination"]["offset"] == 0
 
 
 def test_bundle_export_endpoint_returns_valid_bundle(tmp_path: Path):

@@ -253,6 +253,27 @@ button:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
   margin: 0.8em 0 0.3em 0.1em;
 }
 .run-list .day-header:first-child { margin-top: 0; }
+.run-list .run-load-more {
+  list-style: none; text-align: center; margin: 0.6em 0 0.2em 0;
+}
+.run-list .run-load-more button {
+  width: 100%;
+  padding: 0.5em 0.8em;
+  background: var(--panel-2); border: 1px dashed var(--border);
+  border-radius: 6px;
+  color: var(--accent);
+  font-size: 0.85em; cursor: pointer;
+}
+.run-list .run-load-more button:hover:not(:disabled) {
+  background: var(--panel); border-style: solid;
+}
+.run-list .run-load-more button:disabled {
+  opacity: 0.6; cursor: progress;
+}
+.run-list .run-load-more-hint {
+  list-style: none; text-align: center; font-size: 0.78em;
+  padding: 0.5em 0.3em;
+}
 
 /* Analyze: per-goal trend strips --------------------------------------- */
 .run-trends {

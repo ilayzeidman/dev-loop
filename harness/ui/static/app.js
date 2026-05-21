@@ -1458,6 +1458,13 @@ async function pollJob() {
 
 let CURRENT_TASK = null;
 let RUNS_CACHE = [];
+// Server-side pagination: the Analyze tab loads runs in newest-first
+// pages so a ledger with thousands of task ids doesn't block the tab
+// for seconds. ``RUNS_TOTAL`` is the canonical count from the server;
+// ``Load more`` appends the next page into ``RUNS_CACHE``.
+const RUNS_PAGE_SIZE = 50;
+let RUNS_TOTAL = 0;
+let RUNS_LOADING_MORE = false;
 let RUN_FILTER = "";
 let TRENDS_CACHE = {buckets: [], ungrouped_count: 0, total_runs: 0};
 let TRENDS_COLLAPSED = false;
@@ -1465,14 +1472,36 @@ let TRENDS_COMPARE_PICK = null;  // first task_id when shift-clicking a 2nd poin
 
 async function refreshAnalyzeTab() {
   const [runsRes, trendsRes] = await Promise.all([
-    getJSON("/api/runs"),
+    getJSON("/api/runs?limit=" + RUNS_PAGE_SIZE + "&offset=0"),
     getJSON("/api/runs/trends").catch(() => (
       {buckets: [], ungrouped_count: 0, total_runs: 0})),
   ]);
   RUNS_CACHE = runsRes.runs;
+  RUNS_TOTAL = (runsRes.pagination && typeof runsRes.pagination.total === "number")
+    ? runsRes.pagination.total : RUNS_CACHE.length;
   TRENDS_CACHE = trendsRes;
   renderTrends();
   renderRunList();
+}
+
+async function loadMoreRuns() {
+  if (RUNS_LOADING_MORE || RUNS_CACHE.length >= RUNS_TOTAL) return;
+  RUNS_LOADING_MORE = true;
+  renderRunList();
+  try {
+    const res = await getJSON(
+      "/api/runs?limit=" + RUNS_PAGE_SIZE + "&offset=" + RUNS_CACHE.length);
+    const known = new Set(RUNS_CACHE.map(r => r.task_id));
+    for (const r of res.runs) {
+      if (!known.has(r.task_id)) RUNS_CACHE.push(r);
+    }
+    if (res.pagination && typeof res.pagination.total === "number") {
+      RUNS_TOTAL = res.pagination.total;
+    }
+  } finally {
+    RUNS_LOADING_MORE = false;
+    renderRunList();
+  }
 }
 
 function renderTrends() {
@@ -1642,6 +1671,7 @@ function renderRunList() {
         (r.final_status || r.status || "").toLowerCase().includes(q))
     : all;
 
+  const hasMore = RUNS_CACHE.length < RUNS_TOTAL;
   const tally = $("#run-tally");
   if (!all.length) {
     tally.innerHTML = "";
@@ -1649,11 +1679,18 @@ function renderRunList() {
     const pass = all.filter(r => r.final_status === "passed").length;
     const fail = all.filter(r => isFailed(r.final_status || r.status)).length;
     const other = all.length - pass - fail;
+    const filterTxt = q
+      ? `<span class="muted">· showing ${filtered.length}/${all.length}</span>`
+      : "";
+    const pageTxt = hasMore
+      ? `<span class="muted">· loaded ${all.length} of ${RUNS_TOTAL}</span>`
+      : "";
     tally.innerHTML = `
       <span class="pill pass">${pass} passed</span>
       <span class="pill fail">${fail} failed</span>
       ${other ? `<span class="pill">${other} other</span>` : ""}
-      ${q ? `<span class="muted">· showing ${filtered.length}/${all.length}</span>` : ""}
+      ${filterTxt}
+      ${pageTxt}
     `;
   }
 
@@ -1703,9 +1740,29 @@ function renderRunList() {
         </li>`);
     }
   }
+  if (hasMore && !q) {
+    const remaining = RUNS_TOTAL - RUNS_CACHE.length;
+    const label = RUNS_LOADING_MORE
+      ? "loading…"
+      : `Load ${Math.min(RUNS_PAGE_SIZE, remaining)} more (${remaining} remaining)`;
+    html.push(`
+      <li class="run-load-more">
+        <button type="button" id="run-load-more-btn"
+                ${RUNS_LOADING_MORE ? "disabled" : ""}
+                aria-label="Load more runs">${escapeHtml(label)}</button>
+      </li>`);
+  } else if (hasMore && q) {
+    html.push(`
+      <li class="muted run-load-more-hint">
+        ${RUNS_TOTAL - RUNS_CACHE.length} older runs not yet loaded —
+        clear the filter to page through them.
+      </li>`);
+  }
   list.innerHTML = html.join("");
   $$("#run-list li[data-id]").forEach(li =>
     li.addEventListener("click", () => onRunListClick(li.dataset.id)));
+  const moreBtn = $("#run-load-more-btn");
+  if (moreBtn) moreBtn.addEventListener("click", () => loadMoreRuns());
 }
 
 function onRunListClick(taskId) {

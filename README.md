@@ -107,6 +107,8 @@ from the CLI:
 ```bash
 dev-loop runs ls                   # newest-first table of recent runs
 dev-loop runs ls --status passed   # filter by final_status
+dev-loop runs ls --limit 50 \
+            --offset 50            # paginate a large ledger
 dev-loop runs ls --json            # machine-readable output
 dev-loop runs show <task-id>       # iterations, attempts, report paths
 dev-loop runs show last            # same, for the most recent run

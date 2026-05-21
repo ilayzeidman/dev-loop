@@ -60,7 +60,7 @@ from .doctor import (
     to_json as doctor_to_json,
 )
 from .orchestrator import Orchestrator, OrchestratorConfig
-from .runs import diff_runs, list_runs, show_run
+from .runs import count_runs, diff_runs, iter_runs, list_runs, show_run
 from .scenarios import list_scenarios, show_scenario
 
 
@@ -135,6 +135,11 @@ def main(argv: list[str] | None = None) -> int:
     p_runs_ls.add_argument(
         "--limit", type=int, default=20,
         help="show at most this many runs (default: 20; use 0 for all)",
+    )
+    p_runs_ls.add_argument(
+        "--offset", type=int, default=0,
+        help="skip this many newest-first runs before listing (default: 0). "
+             "Pair with --limit to paginate a large ledger.",
     )
     p_runs_ls.add_argument(
         "--status",
@@ -379,7 +384,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.runs_cmd == "ls":
             return _cmd_runs_ls(
                 resolved.runs_dir,
-                limit=args.limit, status=args.status, as_json=args.json,
+                limit=args.limit, offset=args.offset,
+                status=args.status, as_json=args.json,
             )
         if args.runs_cmd == "show":
             return _cmd_runs_show(
@@ -594,23 +600,61 @@ def _cmd_doctor(
 
 
 def _cmd_runs_ls(
-    runs_dir: Path, *, limit: int, status: str | None, as_json: bool,
+    runs_dir: Path, *, limit: int, offset: int, status: str | None,
+    as_json: bool,
 ) -> int:
-    runs = list_runs(runs_dir)
-    if status:
-        runs = [r for r in runs if r.get("final_status") == status]
-    if limit and limit > 0:
-        runs = runs[:limit]
+    take = limit if limit and limit > 0 else None
+    if offset < 0:
+        offset = 0
+
+    runs: list[dict[str, Any]] = []
+    if status is None:
+        matched = count_runs(runs_dir)
+        seen = 0
+        for entry in iter_runs(runs_dir):
+            if seen < offset:
+                seen += 1
+                continue
+            if take is not None and len(runs) >= take:
+                break
+            runs.append(entry)
+            seen += 1
+    else:
+        matched = 0
+        for entry in iter_runs(runs_dir):
+            if entry.get("final_status") != status:
+                continue
+            matched += 1
+            if matched <= offset:
+                continue
+            if take is not None and len(runs) >= take:
+                continue
+            runs.append(entry)
 
     if as_json:
-        print(json.dumps({"runs_dir": str(runs_dir), "runs": runs}, indent=2))
+        payload = {
+            "runs_dir": str(runs_dir),
+            "runs": runs,
+            "pagination": {
+                "limit": take, "offset": offset,
+                "returned": len(runs),
+                "matched": matched,
+                "has_more": (offset + len(runs)) < matched,
+            },
+        }
+        print(json.dumps(payload, indent=2))
         return 0
 
     if not runs:
         if not runs_dir.exists():
             print(f"no runs yet — runs_dir does not exist: {runs_dir}")
-        elif status:
+        elif status and matched == 0:
             print(f"no runs with final_status={status!r} in {runs_dir}")
+        elif offset and matched:
+            print(
+                f"--offset {offset} skips past every matching run "
+                f"({matched} available); try a smaller offset.",
+            )
         else:
             print(f"no runs found in {runs_dir}")
         return 0
@@ -629,6 +673,18 @@ def _cmd_runs_ls(
     widths = [max(len(row[i]) for row in rows) for i in range(len(headers))]
     for row in rows:
         print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip())
+
+    shown_to = offset + len(runs)
+    if shown_to < matched:
+        remaining = matched - shown_to
+        next_offset = shown_to
+        scope = f" matching --status={status!r}" if status else ""
+        print(
+            f"\nshowing {offset + 1}-{shown_to} of {matched}{scope} "
+            f"({remaining} more) — `runs ls --offset {next_offset}"
+            f"{f' --limit {take}' if take else ''}"
+            f"{f' --status {status}' if status else ''}` for the next page.",
+        )
     return 0
 
 
@@ -642,15 +698,16 @@ def _resolve_run_alias(runs_dir: Path, ref: str) -> str | None:
     """
     if ref != "last" and not ref.startswith("last-"):
         return ref
-    runs = list_runs(runs_dir)
-    if not runs:
-        return None
     if ref == "last":
-        return runs[0]["task_id"]
+        first = next(iter_runs(runs_dir), None)
+        return first["task_id"] if first else None
     try:
         offset = int(ref.split("-", 1)[1])
     except (IndexError, ValueError):
         return ref
+    runs = list_runs(runs_dir, limit=offset + 1)
+    if not runs:
+        return None
     if offset < 0 or offset >= len(runs):
         return None
     return runs[offset]["task_id"]

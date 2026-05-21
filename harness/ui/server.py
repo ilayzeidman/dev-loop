@@ -8,6 +8,7 @@ Read endpoints
   GET  /api/onboarding                   first-run setup checklist
   GET  /api/doctor                       repo diagnostics (delegates to dev-loop doctor)
   GET  /api/runs                         list of task runs + active jobs
+                                         (?limit=&offset= paginate; default: full ledger)
   GET  /api/runs/trends                  per-goal trend buckets + sparkline data
   GET  /api/runs/<task-id>               task manifest
   GET  /api/runs/<task-id>/report        rendered Markdown report
@@ -65,7 +66,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from ..bundle import (
     BundleError,
@@ -91,7 +92,9 @@ from ..doctor import doctor_summary as _doctor_summary
 from ..doctor import run_doctor as _run_doctor
 from ..playbooks import PLAYBOOK_DIR, list_playbooks, repo_playbook_dir
 from ..runs import audit_rollup as _runs_audit_rollup
+from ..runs import count_runs as _runs_count_runs
 from ..runs import diff_deltas as _runs_diff_deltas
+from ..runs import iter_runs as _runs_iter_runs
 from ..runs import iteration_ai_calls as _runs_iteration_ai_calls
 from ..runs import show_run as _runs_show_run
 from ..schemas import SCHEMA_DIR
@@ -698,31 +701,39 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
         def _api_list_runs(self) -> None:
             _, r = _resolved()
             runs_dir = r.runs_dir
+            limit, offset = _parse_page_args(urlparse(self.path).query)
+            total = _runs_count_runs(runs_dir)
             out: list[dict[str, Any]] = []
-            if runs_dir.exists():
-                for d in sorted(runs_dir.iterdir(), reverse=True):
-                    if not d.is_dir():
-                        continue
-                    tm = d / "task_manifest.json"
-                    if not tm.exists():
-                        continue
-                    try:
-                        data = read_json(tm)
-                    except Exception:
-                        continue
-                    tc = data.get("task_contract") or {}
-                    out.append({
-                        "task_id": data.get("task_id", d.name),
-                        "status": data.get("status"),
-                        "final_status": data.get("final_status"),
-                        "selected_iteration": data.get("selected_iteration"),
-                        "created_at_utc": data.get("created_at_utc"),
-                        "updated_at_utc": data.get("updated_at_utc"),
-                        "iterations": _count_iterations(d),
-                        "goal": tc.get("implementation_goal"),
-                        "duration_seconds": _run_duration_seconds(data),
-                    })
-            self._send_json(200, {"runs": out, "jobs": jobs.list()})
+            seen = 0
+            for entry in _runs_iter_runs(runs_dir):
+                if seen < offset:
+                    seen += 1
+                    continue
+                if limit is not None and len(out) >= limit:
+                    break
+                out.append({
+                    "task_id": entry.get("task_id"),
+                    "status": entry.get("status"),
+                    "final_status": entry.get("final_status"),
+                    "selected_iteration": entry.get("selected_iteration"),
+                    "created_at_utc": entry.get("created_at_utc"),
+                    "updated_at_utc": entry.get("updated_at_utc"),
+                    "iterations": entry.get("iterations") or 0,
+                    "goal": entry.get("goal"),
+                    "duration_seconds": entry.get("duration_seconds"),
+                })
+                seen += 1
+            self._send_json(200, {
+                "runs": out,
+                "jobs": jobs.list(),
+                "pagination": {
+                    "limit": limit,
+                    "offset": offset,
+                    "returned": len(out),
+                    "total": total,
+                    "has_more": (offset + len(out)) < total,
+                },
+            })
 
         def _api_runs_trends(self) -> None:
             _, r = _resolved()
@@ -1377,6 +1388,37 @@ def _count_iterations(run_dir: Path) -> int:
     # (e.g. a .DS_Store from a checkout, or a tmp scratch file) must not
     # inflate the count or skew downstream summaries.
     return sum(1 for d in iters.iterdir() if d.is_dir())
+
+
+def _parse_page_args(query: str) -> tuple[int | None, int]:
+    """Pull ``limit`` and ``offset`` from a URL query string.
+
+    Both are optional. Negative or non-numeric values are clamped to a
+    sensible default (``offset=0``, ``limit=None``) rather than raising
+    so a hand-edited URL can't 500 the listing endpoint. ``limit=0`` is
+    treated as "no cap" so callers can opt out of the page window when
+    they need the full ledger.
+    """
+    qs = parse_qs(query or "")
+
+    def _int(name: str, default: int | None) -> int | None:
+        raw = qs.get(name, [None])[0]
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
+
+    limit = _int("limit", None)
+    if limit is not None:
+        limit = max(0, limit)
+        if limit == 0:
+            limit = None
+    offset = _int("offset", 0) or 0
+    if offset < 0:
+        offset = 0
+    return limit, offset
 
 
 def _summarize_run_for_compare(runs_dir: Path, task_id: str) -> dict[str, Any] | None:

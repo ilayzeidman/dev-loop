@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -55,39 +56,116 @@ def count_iterations(run_dir: Path) -> int:
     return sum(1 for d in iters.iterdir() if d.is_dir())
 
 
-def list_runs(runs_dir: Path) -> list[dict[str, Any]]:
-    """Return a newest-first list of run summaries.
+def _run_dirs_newest_first(runs_dir: Path) -> Iterator[Path]:
+    """Yield run directories newest-first by directory name.
+
+    Directory names are timestamp-prefixed (``YYYYMMDD-HHMMSS-…``) so
+    lexical reverse-sort matches chronological newest-first. Non-dirs
+    are skipped here so callers don't repeat the filter.
+    """
+    if not runs_dir.exists():
+        return
+    for d in sorted(runs_dir.iterdir(), reverse=True):
+        if d.is_dir():
+            yield d
+
+
+def _summarize_run_dir(d: Path) -> dict[str, Any] | None:
+    """Build one ``list_runs`` entry, or ``None`` for a bad/partial dir.
+
+    Returning ``None`` (rather than raising) lets the streaming iterator
+    skip corrupt runs without aborting the scan — the same tolerance
+    ``list_runs`` has always had, but pulled out so a future caller can
+    process runs without ever materializing the whole list.
+    """
+    tm = d / "task_manifest.json"
+    if not tm.exists():
+        return None
+    try:
+        data = read_json(tm)
+    except Exception:
+        return None
+    tc = data.get("task_contract") or {}
+    return {
+        "task_id": data.get("task_id", d.name),
+        "status": data.get("status"),
+        "final_status": data.get("final_status"),
+        "selected_iteration": data.get("selected_iteration"),
+        "created_at_utc": data.get("created_at_utc"),
+        "updated_at_utc": data.get("updated_at_utc"),
+        "iterations": count_iterations(d),
+        "goal": tc.get("implementation_goal"),
+        "duration_seconds": run_duration_seconds(data),
+        "path": str(d),
+    }
+
+
+def iter_runs(runs_dir: Path) -> Iterator[dict[str, Any]]:
+    """Lazily yield run summaries newest-first.
+
+    Skips directories without a readable ``task_manifest.json`` rather
+    than raising, so partially-written or corrupt runs don't break the
+    scan. Pull-based so callers paginating a large ledger
+    (``dev-loop runs ls --limit N``, ``GET /api/runs?limit=N``) only
+    parse the manifests they actually need.
+    """
+    for d in _run_dirs_newest_first(runs_dir):
+        entry = _summarize_run_dir(d)
+        if entry is not None:
+            yield entry
+
+
+def count_runs(runs_dir: Path) -> int:
+    """Total number of readable runs in the ledger.
+
+    Walks the same set of directories ``iter_runs`` would yield without
+    parsing each manifest — so a paginated UI can show "showing N of
+    TOTAL" without re-reading every ``task_manifest.json``. Bad runs
+    that ``iter_runs`` would skip are still counted here because the
+    cheap check (``task_manifest.json`` exists) is what determines
+    "looks like a run". This is intentionally a slight over-count
+    rather than walking every JSON twice.
+    """
+    n = 0
+    for d in _run_dirs_newest_first(runs_dir):
+        if (d / "task_manifest.json").exists():
+            n += 1
+    return n
+
+
+def list_runs(
+    runs_dir: Path,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Return a newest-first window of run summaries.
+
+    With no arguments returns every readable run (back-compat for
+    callers like trend computation that need the full set). ``limit``
+    caps the number of entries returned; ``offset`` skips that many
+    newest-first entries before collecting. Both parameters operate
+    over the post-filter (readable-only) stream, so a corrupt run never
+    "consumes" a slot in the window the caller asked for.
 
     Skips directories without a readable ``task_manifest.json`` rather
     than raising, so partially-written or corrupt runs don't break
     ``dev-loop runs ls``.
     """
+    if offset < 0:
+        offset = 0
+    if limit is not None and limit < 0:
+        limit = 0
     out: list[dict[str, Any]] = []
-    if not runs_dir.exists():
-        return out
-    for d in sorted(runs_dir.iterdir(), reverse=True):
-        if not d.is_dir():
+    seen = 0
+    for entry in iter_runs(runs_dir):
+        if seen < offset:
+            seen += 1
             continue
-        tm = d / "task_manifest.json"
-        if not tm.exists():
-            continue
-        try:
-            data = read_json(tm)
-        except Exception:
-            continue
-        tc = data.get("task_contract") or {}
-        out.append({
-            "task_id": data.get("task_id", d.name),
-            "status": data.get("status"),
-            "final_status": data.get("final_status"),
-            "selected_iteration": data.get("selected_iteration"),
-            "created_at_utc": data.get("created_at_utc"),
-            "updated_at_utc": data.get("updated_at_utc"),
-            "iterations": count_iterations(d),
-            "goal": tc.get("implementation_goal"),
-            "duration_seconds": run_duration_seconds(data),
-            "path": str(d),
-        })
+        if limit is not None and len(out) >= limit:
+            break
+        out.append(entry)
+        seen += 1
     return out
 
 

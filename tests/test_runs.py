@@ -144,6 +144,105 @@ def test_list_runs_skips_corrupt_and_unmanifested_dirs(tmp_path: Path):
     assert ids == ["20260101-000000-good"]
 
 
+def test_iter_runs_yields_lazily_newest_first(tmp_path: Path):
+    """``iter_runs`` is the streaming primitive — it should yield runs
+    newest-first without materializing the whole ledger, so callers
+    paginating a directory with thousands of run dirs don't pay for
+    runs they never look at."""
+    for i in range(5):
+        _write_run(
+            tmp_path, f"2026010{i + 1}-000000-r{i}",
+            goal=f"run {i}",
+            created=f"2026-01-0{i + 1}T00:00:00Z",
+            updated=f"2026-01-0{i + 1}T00:01:00Z",
+        )
+    it = runs.iter_runs(tmp_path)
+    first = next(it)
+    assert first["task_id"] == "20260105-000000-r4"
+    rest_ids = [r["task_id"] for r in it]
+    assert rest_ids == [
+        "20260104-000000-r3", "20260103-000000-r2",
+        "20260102-000000-r1", "20260101-000000-r0",
+    ]
+
+
+def test_iter_runs_empty_when_dir_missing(tmp_path: Path):
+    assert list(runs.iter_runs(tmp_path / "nope")) == []
+
+
+def test_iter_runs_skips_corrupt_dirs(tmp_path: Path):
+    """A corrupt task_manifest.json must not stop the stream — the next
+    readable run still yields. This is the property that keeps `runs ls`
+    resilient on partially-written ledgers."""
+    _write_run(tmp_path, "20260101-000000-good")
+    bad = tmp_path / "20260102-000000-bad"
+    bad.mkdir()
+    (bad / "task_manifest.json").write_text("{not json")
+    _write_run(tmp_path, "20260103-000000-newer")
+    ids = [r["task_id"] for r in runs.iter_runs(tmp_path)]
+    assert ids == ["20260103-000000-newer", "20260101-000000-good"]
+
+
+def test_count_runs_empty(tmp_path: Path):
+    assert runs.count_runs(tmp_path / "nope") == 0
+    assert runs.count_runs(tmp_path) == 0
+
+
+def test_count_runs_counts_manifested_dirs(tmp_path: Path):
+    """``count_runs`` is the cheap total used by the paginated UI; it
+    should treat anything with a ``task_manifest.json`` as a run (no
+    JSON parse needed) so the count remains O(N) directory stats."""
+    _write_run(tmp_path, "20260101-000000-a")
+    _write_run(tmp_path, "20260102-000000-b")
+    bare = tmp_path / "20260103-000000-bare"
+    bare.mkdir()
+    (tmp_path / "loose.txt").write_text("not a run dir")
+    assert runs.count_runs(tmp_path) == 2
+
+
+def test_list_runs_pagination_limit_and_offset(tmp_path: Path):
+    for i in range(6):
+        _write_run(
+            tmp_path, f"2026010{i + 1}-000000-r{i}",
+            created=f"2026-01-0{i + 1}T00:00:00Z",
+            updated=f"2026-01-0{i + 1}T00:01:00Z",
+        )
+    page = runs.list_runs(tmp_path, limit=2, offset=0)
+    assert [r["task_id"] for r in page] == [
+        "20260106-000000-r5", "20260105-000000-r4",
+    ]
+    page2 = runs.list_runs(tmp_path, limit=2, offset=2)
+    assert [r["task_id"] for r in page2] == [
+        "20260104-000000-r3", "20260103-000000-r2",
+    ]
+    page3 = runs.list_runs(tmp_path, limit=2, offset=4)
+    assert [r["task_id"] for r in page3] == [
+        "20260102-000000-r1", "20260101-000000-r0",
+    ]
+    page4 = runs.list_runs(tmp_path, limit=2, offset=6)
+    assert page4 == []
+
+
+def test_list_runs_negative_paging_args_are_clamped(tmp_path: Path):
+    _write_run(tmp_path, "20260101-000000-a")
+    _write_run(tmp_path, "20260102-000000-b")
+    assert len(runs.list_runs(tmp_path, limit=-1)) == 0
+    assert len(runs.list_runs(tmp_path, offset=-5)) == 2
+
+
+def test_list_runs_no_limit_returns_full_ledger(tmp_path: Path):
+    """Callers like trend computation need the full ledger; passing no
+    ``limit`` must still return every run (back-compat for the unpaged
+    contract that existed before this iteration)."""
+    for i in range(4):
+        _write_run(
+            tmp_path, f"2026010{i + 1}-000000-r{i}",
+            created=f"2026-01-0{i + 1}T00:00:00Z",
+            updated=f"2026-01-0{i + 1}T00:01:00Z",
+        )
+    assert len(runs.list_runs(tmp_path)) == 4
+
+
 def test_show_run_returns_none_for_unknown(tmp_path: Path):
     assert runs.show_run(tmp_path, "missing") is None
 

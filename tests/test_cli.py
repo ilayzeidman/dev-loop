@@ -294,6 +294,91 @@ def test_runs_ls_tolerates_corrupt_manifest(tmp_path: Path, capsys):
     assert "20260102-000000-bad" not in out
 
 
+def test_runs_ls_pagination_limits_visible_rows_and_hints_next_page(
+    tmp_path: Path, capsys,
+):
+    """`--limit` + `--offset` page through the ledger newest-first, and
+    the human-readable output points at the next-page invocation so a
+    user can flip through a thousand-run ledger without re-reading docs."""
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    runs_dir = tmp_path / ".dev-loop" / "runs"
+    for i in range(5):
+        _fake_run(
+            runs_dir, f"2026010{i + 1}-000000-r{i}",
+            goal=f"run {i}",
+            created=f"2026-01-0{i + 1}T00:00:00Z",
+            updated=f"2026-01-0{i + 1}T00:01:00Z",
+        )
+
+    rc = cli.main([
+        "--repo", str(tmp_path), "runs", "ls", "--limit", "2",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "20260105-000000-r4" in out
+    assert "20260104-000000-r3" in out
+    assert "20260103-000000-r2" not in out
+    assert "showing 1-2 of 5" in out
+    assert "--offset 2" in out
+    assert "--limit 2" in out
+
+    rc = cli.main([
+        "--repo", str(tmp_path), "runs", "ls",
+        "--limit", "2", "--offset", "2",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "20260103-000000-r2" in out
+    assert "20260102-000000-r1" in out
+    assert "20260105-000000-r4" not in out
+    assert "showing 3-4 of 5" in out
+
+
+def test_runs_ls_json_includes_pagination_block(tmp_path: Path, capsys):
+    """`--json` always includes a ``pagination`` block — scripts pipelining
+    `runs ls --json` rely on ``has_more`` and ``matched`` to drive
+    follow-up pages without reparsing the directory."""
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    runs_dir = tmp_path / ".dev-loop" / "runs"
+    for i in range(3):
+        _fake_run(
+            runs_dir, f"2026010{i + 1}-000000-r{i}",
+            created=f"2026-01-0{i + 1}T00:00:00Z",
+            updated=f"2026-01-0{i + 1}T00:01:00Z",
+        )
+
+    rc = cli.main([
+        "--repo", str(tmp_path), "runs", "ls",
+        "--limit", "2", "--json",
+    ])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    page = payload["pagination"]
+    assert page["limit"] == 2
+    assert page["offset"] == 0
+    assert page["returned"] == 2
+    assert page["matched"] == 3
+    assert page["has_more"] is True
+    assert [r["task_id"] for r in payload["runs"]] == [
+        "20260103-000000-r2", "20260102-000000-r1",
+    ]
+
+
+def test_runs_ls_offset_past_end_explains_to_user(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    runs_dir = tmp_path / ".dev-loop" / "runs"
+    _fake_run(runs_dir, "20260101-000000-a")
+    rc = cli.main([
+        "--repo", str(tmp_path), "runs", "ls", "--offset", "5",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out.lower()
+    assert "offset" in out and "5" in out
+
+
 def test_runs_show_summarizes_one_run(tmp_path: Path, capsys):
     cli.main(["--repo", str(tmp_path), "init"])
     capsys.readouterr()
