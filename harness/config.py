@@ -68,6 +68,8 @@ class HarnessConfig:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "HarnessConfig":
+        # Don't mutate the caller's dict.
+        raw = dict(raw)
         valid = {f.name for f in fields(cls)}
         # Allow ``policy:`` nested form too.
         policy_block = raw.pop("policy", None) or {}
@@ -75,12 +77,33 @@ class HarnessConfig:
         for k, v in policy_block.items():
             if k in valid:
                 filtered[k] = v
-        unknown = (set(raw) - valid) - {"policy"}
+        unknown = (set(raw) - valid)
         if unknown:
             # Don't crash on unknown keys; surface them via notes so users
             # see typos without losing the run.
             extra = filtered.get("notes", "")
             filtered["notes"] = (extra + f" [unknown keys ignored: {sorted(unknown)}]").strip()
+
+        # Type-check int fields so a typo like ``max_code_iterations: many``
+        # surfaces here instead of crashing later inside the orchestrator
+        # loop with an opaque TypeError.
+        type_errors: list[str] = []
+        for fname in (
+            "max_code_iterations",
+            "max_validation_attempts_per_iteration",
+            "max_diagnostic_rounds_per_failure",
+            "max_total_wall_clock_minutes",
+        ):
+            if fname in filtered and not isinstance(filtered[fname], bool) and not isinstance(filtered[fname], int):
+                # YAML may parse a quoted number as a string; try coercion.
+                try:
+                    filtered[fname] = int(filtered[fname])
+                except (TypeError, ValueError):
+                    type_errors.append(f"{fname} must be int, got {filtered[fname]!r}")
+                    filtered.pop(fname)
+        if type_errors:
+            extra = filtered.get("notes", "")
+            filtered["notes"] = (extra + f" [config type errors: {type_errors}]").strip()
         return cls(**filtered)
 
     @classmethod

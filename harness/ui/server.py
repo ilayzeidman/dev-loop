@@ -187,6 +187,9 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
         def do_POST(self) -> None:  # noqa: N802
             try:
                 self._dispatch_post(urlparse(self.path).path)
+            except json.JSONDecodeError as e:
+                # Malformed body is a client error, not a server error.
+                self._send_json(400, {"error": f"invalid json body: {e}"})
             except Exception as e:
                 self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 

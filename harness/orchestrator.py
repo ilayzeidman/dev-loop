@@ -241,20 +241,39 @@ class Orchestrator:
             output_schema_name="implementation_result.v1.json",
             budget_seconds=1800,
         )
-        try:
-            schemas.validate("implementation_result.v1.json", impl_res.output)
-        except Exception as e:
-            return _failed_iteration_record(
-                iteration=iteration,
-                reason=f"invalid implementation_result: {e}",
-            )
-
+        # Record the AI call before validation so the raw output survives
+        # even when the agent emits something that fails schema validation —
+        # otherwise the iteration dir would be empty and the audit trail
+        # would lose the only evidence of what the agent actually produced.
         ledger.record_ai_call(
             iteration, 1, "implementation",
             input_obj=redact(impl_input),
-            output_obj=impl_res.output,
+            output_obj=impl_res.output if isinstance(impl_res.output, dict) else {"_raw": str(impl_res.output)},
             raw_provider_log=impl_res.raw_log,
         )
+
+        try:
+            schemas.validate("implementation_result.v1.json", impl_res.output)
+        except Exception as e:
+            reason = f"invalid implementation_result: {e}"
+            # Write an iteration manifest so the iteration is auditable
+            # even though no patch was extracted. Per design §8 every
+            # completed iteration must have a manifest.
+            ledger.write_iteration_manifest(iteration, {
+                "task_id": ledger.task_id,
+                "iteration": iteration,
+                "code": {
+                    "base_sha": base_sha,
+                    "patch_hash": None,
+                    "changed_files": [],
+                    "claim_mismatches": {},
+                },
+                "agent_output": impl_res.output if isinstance(impl_res.output, dict) else None,
+                "attempts": [],
+                "final_e2e_status": "failed",
+                "error": reason,
+            })
+            return _failed_iteration_record(iteration=iteration, reason=reason)
 
         # Patch extraction
         patch = extract_patch(

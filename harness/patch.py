@@ -71,11 +71,14 @@ def extract_patch(workspace: Path, claimed_files: list[str] | None = None) -> Pa
             continue
         code = line[:2]
         rest = line[3:]
-        # Renames show up as "path -> newpath"; take both ends as changed.
+        # Renames show up as "old -> new". The rename source disappears
+        # from the working tree, so it must also be recorded as deleted
+        # for downstream consumers (review report, dossier diff summary).
         if " -> " in rest:
             old_p, _, new_p = rest.partition(" -> ")
             changed.append(old_p)
             changed.append(new_p)
+            deleted.append(old_p)
             continue
         path = rest
         if "D" in code:

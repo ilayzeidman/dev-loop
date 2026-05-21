@@ -164,6 +164,9 @@ class CapabilityRegistry:
 
         if duration > spec.timeout_seconds:
             # Soft-timeout note. We don't kill threads; we just flag it.
+            # Tolerate misbehaving impls that returned a non-dict ``data``.
+            if not isinstance(result.data, dict):
+                result.data = {}
             result.data.setdefault("_warnings", []).append(
                 f"exceeded soft timeout of {spec.timeout_seconds}s ({duration:.1f}s)"
             )

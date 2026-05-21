@@ -94,3 +94,30 @@ def test_replay_capabilities_read_scenario_files(tmp_path: Path):
     )
     assert res.status == "ok"
     assert res.data["warnings"] == ["w"]
+
+
+def test_soft_timeout_warning_tolerates_non_dict_data():
+    """A capability impl that returns ``data=None`` (e.g. ``CapabilityResult(
+    status='error', data=None, error=...)``) must not crash the registry's
+    soft-timeout branch."""
+    import time as _time
+    from harness.capabilities.base import Capability
+    from harness.capabilities.registry import CapabilityRegistry, CapabilitySpec
+
+    class _Slow(Capability):
+        def invoke(self, *, params, manifest, ctx):
+            # Force the soft-timeout branch via a 0-second budget.
+            _time.sleep(0.01)
+            return CapabilityResult(status="error", data=None, error="boom")
+
+    reg = CapabilityRegistry()
+    reg._specs["x"] = CapabilitySpec(
+        name="x", category="local_only", agent_requestable=False,
+        timeout_seconds=0, uses_run_manifest=False, redacts_output=False,
+        audit=False, prod_possible=False, forced_params={}, impl=_Slow(),
+    )
+    res = reg.invoke("x", params={}, manifest={}, ctx={})
+    # Should have produced the warning without crashing.
+    assert res.status == "error"
+    assert isinstance(res.data, dict)
+    assert any("soft timeout" in w for w in res.data.get("_warnings", []))

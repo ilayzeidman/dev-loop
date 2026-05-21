@@ -98,3 +98,37 @@ def test_capabilities_endpoint(tmp_path: Path):
         assert status == 200
         names = [c["name"] for c in json.loads(body)["capabilities"]]
         assert "trigger_dev_jenkins_build" in names
+
+
+def test_malformed_json_body_returns_400(tmp_path: Path):
+    """Malformed JSON in a POST body is a client error, not a 500."""
+    import urllib.error
+    with _server(tmp_path) as (port, _):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/implement",
+            method="POST", data=b"{not-json",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=2)
+            raise AssertionError("expected HTTPError")
+        except urllib.error.HTTPError as e:
+            assert e.code == 400, e.code
+            body = json.loads(e.read().decode("utf-8"))
+            assert "invalid json" in body["error"].lower()
+
+
+def test_bad_config_type_still_serves_api(tmp_path: Path):
+    """If the saved config has the wrong type, ``/api/config`` must still
+    respond (not 500) and the policy value must be an int."""
+    cd = tmp_path / ".dev-loop"
+    cd.mkdir()
+    (cd / "config.yaml").write_text(
+        "policy:\n  max_code_iterations: many\n"
+    )
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/config")
+        assert status == 200
+        data = json.loads(body)
+        # Defaulted back to 5 (or some int) rather than the string "many".
+        assert isinstance(data["policy"]["max_code_iterations"], int)

@@ -172,6 +172,49 @@ def test_replay_run_failed_e2e_invokes_triage_and_writes_dossier(tmp_path: Path)
     assert "schema_validation_error" not in report
 
 
+def test_replay_run_records_iteration_manifest_when_impl_invalid(tmp_path: Path):
+    """When the agent's implementation_result fails schema validation,
+    the iteration manifest and AI call record must still be written so
+    the iteration is auditable (design §8, §20)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed_repo(repo)
+    scenario = tmp_path / "bad_impl_scenario"
+    _make_failing_scenario(scenario)
+    # Override implementation_result with something that fails schema
+    # validation (missing required fields).
+    (scenario / "implementation_result.json").write_text(json.dumps({
+        "type": "implementation_result",
+        "summary": "",  # minLength: 1 violation
+    }, indent=2), encoding="utf-8")
+    runner = create_runner("replay", replay_scenario=scenario)
+    registry = load_default_registry()
+    cfg = OrchestratorConfig(
+        repo_root=repo,
+        runs_dir=tmp_path / "runs",
+        sandbox_dir=tmp_path / "sb",
+        clean_workspace_dir=tmp_path / "clean",
+        request="exercise invalid impl path",
+        provider="replay",
+        replay_scenario=scenario,
+        policy=LoopPolicy(max_code_iterations=1),
+    )
+    orch = Orchestrator(config=cfg, runner=runner, registry=registry)
+    result = orch.run()
+    # Iteration manifest exists.
+    iter_manifest_path = (
+        result.ledger_dir / "iterations" / "iter-001" / "manifest.json"
+    )
+    assert iter_manifest_path.exists(), list(result.ledger_dir.rglob("*"))
+    m = read_json(iter_manifest_path)
+    assert m["iteration"] == 1
+    assert "invalid implementation_result" in (m.get("error") or "")
+    # AI call for the implementation phase was recorded.
+    ai_calls_dir = result.ledger_dir / "iterations" / "iter-001" / "ai_calls"
+    impl_calls = [d for d in ai_calls_dir.iterdir() if "implementation" in d.name]
+    assert impl_calls, list(ai_calls_dir.iterdir())
+
+
 def test_replay_run_same_failure_twice_hits_stop_condition(tmp_path: Path):
     """When the same E2E failure repeats, the loop should stop with
     failed_stop_condition rather than falling through to inconclusive."""

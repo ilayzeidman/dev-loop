@@ -139,3 +139,21 @@ def test_apply_patch_to_clean(fresh_repo: Path, tmp_path: Path):
     dest = tmp_path / "clean"
     apply_patch_to_clean(fresh_repo, base_sha, info.diff, dest)
     assert (dest / "a.py").read_text() == "v = 2\n"
+
+
+def test_extract_patch_rename_marks_old_path_deleted(fresh_repo: Path):
+    """A renamed file's old path is gone from the working tree, so it
+    must show up in ``deleted_files`` even when the rename is also a
+    modification (porcelain code 'RM')."""
+    import subprocess
+    (fresh_repo / "old.txt").write_text("hello\n")
+    subprocess.run(["git", "add", "."], cwd=fresh_repo, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "seed"], cwd=fresh_repo, check=True)
+    subprocess.run(["git", "mv", "old.txt", "new.txt"], cwd=fresh_repo, check=True)
+    (fresh_repo / "new.txt").write_text("hello world\n")
+    info = extract_patch(fresh_repo)
+    # Both ends are recorded as changed.
+    assert "old.txt" in info.changed_files
+    assert "new.txt" in info.changed_files
+    # The rename source must also be flagged as deleted.
+    assert "old.txt" in info.deleted_files
