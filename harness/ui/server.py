@@ -428,6 +428,7 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                         data = read_json(tm)
                     except Exception:
                         continue
+                    tc = data.get("task_contract") or {}
                     out.append({
                         "task_id": data.get("task_id", d.name),
                         "status": data.get("status"),
@@ -436,6 +437,8 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                         "created_at_utc": data.get("created_at_utc"),
                         "updated_at_utc": data.get("updated_at_utc"),
                         "iterations": _count_iterations(d),
+                        "goal": tc.get("implementation_goal"),
+                        "duration_seconds": _run_duration_seconds(data),
                     })
             self._send_json(200, {"runs": out, "jobs": jobs.list()})
 
@@ -731,6 +734,24 @@ def _read_safe_json(p: Path) -> Any:
         return read_json(p)
     except Exception as e:
         return {"_error": str(e)}
+
+
+def _run_duration_seconds(manifest: dict[str, Any]) -> int | None:
+    """Wall-clock seconds between ``created_at_utc`` and ``updated_at_utc``.
+
+    Returns ``None`` if either timestamp is missing or unparseable so the
+    UI can render an em dash rather than a misleading zero.
+    """
+    a = manifest.get("created_at_utc")
+    b = manifest.get("updated_at_utc")
+    if not a or not b:
+        return None
+    try:
+        ta = datetime.strptime(a, "%Y-%m-%dT%H:%M:%SZ")
+        tb = datetime.strptime(b, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return None
+    return max(0, int((tb - ta).total_seconds()))
 
 
 def _count_iterations(run_dir: Path) -> int:

@@ -304,6 +304,57 @@ def test_init_rejects_non_object_body(tmp_path: Path):
             assert e.code == 400, e.code
 
 
+def test_run_duration_seconds_helper():
+    """``_run_duration_seconds`` should return wall-clock seconds for
+    well-formed timestamps and ``None`` (not 0, not an exception) when
+    either side is missing or malformed."""
+    from harness.ui.server import _run_duration_seconds
+    assert _run_duration_seconds({
+        "created_at_utc": "2026-05-21T12:55:52Z",
+        "updated_at_utc": "2026-05-21T12:57:30Z",
+    }) == 98
+    # Same timestamp = 0, not None.
+    assert _run_duration_seconds({
+        "created_at_utc": "2026-05-21T12:55:52Z",
+        "updated_at_utc": "2026-05-21T12:55:52Z",
+    }) == 0
+    # End-before-start clamps to 0 rather than going negative.
+    assert _run_duration_seconds({
+        "created_at_utc": "2026-05-21T12:57:00Z",
+        "updated_at_utc": "2026-05-21T12:55:00Z",
+    }) == 0
+    assert _run_duration_seconds({}) is None
+    assert _run_duration_seconds({"created_at_utc": "junk",
+                                  "updated_at_utc": "2026-05-21T12:55:52Z"}) is None
+
+
+def test_runs_list_surfaces_goal_and_duration(tmp_path: Path):
+    """The Analyze tab depends on goal+duration to render a scannable run
+    list. Pin that ``/api/runs`` returns those fields for a recorded run."""
+    runs_dir = tmp_path / ".dev-loop" / "runs" / "20260521-aaaaaa-demo"
+    runs_dir.mkdir(parents=True)
+    (runs_dir / "task_manifest.json").write_text(json.dumps({
+        "task_id": "20260521-aaaaaa-demo",
+        "status": "completed",
+        "final_status": "passed",
+        "selected_iteration": 1,
+        "created_at_utc": "2026-05-21T12:55:52Z",
+        "updated_at_utc": "2026-05-21T12:56:10Z",
+        "task_contract": {"implementation_goal": "ship a delightful UI"},
+    }))
+    (runs_dir / "iterations").mkdir()
+    (runs_dir / "iterations" / "iter-001").mkdir()
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/runs")
+        assert status == 200
+        runs = json.loads(body)["runs"]
+        assert len(runs) == 1
+        r = runs[0]
+        assert r["goal"] == "ship a delightful UI"
+        assert r["duration_seconds"] == 18
+        assert r["iterations"] == 1
+
+
 def test_scenario_create_blocks_dotdot_name(tmp_path: Path):
     """The create endpoint must also reject ``..`` (its existing check did
     via ``startswith('.')``; this pins that behaviour)."""

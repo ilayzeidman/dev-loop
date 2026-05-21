@@ -205,15 +205,22 @@
     <div class="cols">
       <aside class="sidebar">
         <h3>Past runs</h3>
+        <input id="run-filter" type="search"
+          placeholder="filter by id, goal, or status…">
+        <div id="run-tally" class="run-tally muted"></div>
         <ul id="run-list" class="run-list"></ul>
       </aside>
       <div class="content">
         <div class="panel" id="analyze-empty">
-          <p class="muted">Pick a run on the left.</p>
+          <h2>Analyze runs</h2>
+          <p class="muted">
+            Pick a run on the left to see its hero summary, iterations,
+            patches, and capability audit. Every view has a copyable link
+            you can share with a teammate.
+          </p>
         </div>
         <div class="panel hidden" id="analyze-detail">
-          <h2 id="ad-title">—</h2>
-          <div id="ad-summary" class="summary"></div>
+          <div id="ad-hero" class="run-hero"></div>
 
           <div class="subnav">
             <button data-ad="report" class="active">Report</button>
@@ -224,7 +231,14 @@
 
           <div id="ad-report" class="ad-panel"></div>
           <div id="ad-iterations" class="ad-panel hidden"></div>
-          <div id="ad-audit" class="ad-panel hidden"><pre id="audit-pre"></pre></div>
+          <div id="ad-audit" class="ad-panel hidden">
+            <div class="row audit-controls">
+              <input id="audit-filter" type="search"
+                placeholder="filter by capability or status…">
+              <span id="audit-count" class="muted"></span>
+            </div>
+            <div id="audit-table-wrap"></div>
+          </div>
           <div id="ad-raw" class="ad-panel hidden"><pre id="raw-pre"></pre></div>
         </div>
       </div>

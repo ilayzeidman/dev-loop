@@ -182,3 +182,122 @@ button:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
 .md pre { white-space: pre-wrap; }
 .md blockquote { color: var(--muted); border-left: 3px solid var(--border);
   margin: 0.5em 0; padding: 0.2em 0.7em; }
+
+/* Analyze: runs list ---------------------------------------------------- */
+#run-filter { margin-bottom: 0.5em; }
+.run-tally { font-size: 0.78em; margin-bottom: 0.5em; }
+.run-tally .pill { display: inline-block; margin-right: 0.4em; }
+.pill {
+  display: inline-block; padding: 0.05em 0.55em; border-radius: 999px;
+  font-size: 0.78em; font-weight: 600; line-height: 1.6;
+  background: var(--panel-2); border: 1px solid var(--border); color: var(--fg);
+  white-space: nowrap;
+}
+.pill.pass { background: rgba(110, 231, 183, 0.15); border-color: rgba(110, 231, 183, 0.6); color: var(--ok); }
+.pill.fail { background: rgba(255, 141, 161, 0.15); border-color: rgba(255, 141, 161, 0.5); color: var(--err); }
+.pill.warn { background: rgba(255, 209, 102, 0.15); border-color: rgba(255, 209, 102, 0.5); color: var(--warn); }
+.pill.info { background: rgba(122, 162, 255, 0.15); border-color: rgba(122, 162, 255, 0.5); color: var(--accent); }
+.run-list li.active { outline: 2px solid var(--accent); background: #232a37; }
+.run-list .run-row { display: grid; gap: 0.25em; }
+.run-list .run-row .top { display: flex; gap: 0.5em; align-items: center; flex-wrap: wrap; }
+.run-list .run-row .goal { font-size: 0.85em; }
+.run-list .run-row .meta { color: var(--muted); font-size: 0.75em; }
+.run-list .day-header {
+  list-style: none; color: var(--muted); font-size: 0.72em;
+  text-transform: uppercase; letter-spacing: 0.6px;
+  margin: 0.8em 0 0.3em 0.1em;
+}
+.run-list .day-header:first-child { margin-top: 0; }
+
+/* Analyze: hero --------------------------------------------------------- */
+.run-hero {
+  display: grid; gap: 0.6em;
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 1em; margin-bottom: 1em;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+}
+.run-hero.pass { border-left: 4px solid var(--ok); }
+.run-hero.fail { border-left: 4px solid var(--err); }
+.run-hero.warn { border-left: 4px solid var(--warn); }
+.run-hero .verdict {
+  display: flex; align-items: center; gap: 0.7em; flex-wrap: wrap;
+}
+.run-hero .verdict h2 { margin: 0; font-size: 1.05em; }
+.run-hero .verdict .big { font-size: 1.6em; font-weight: 700; letter-spacing: 0.5px; }
+.run-hero .verdict .big.pass { color: var(--ok); }
+.run-hero .verdict .big.fail { color: var(--err); }
+.run-hero .verdict .big.warn { color: var(--warn); }
+.run-hero .goal-line { font-size: 0.92em; }
+.run-hero .goal-line .label { color: var(--muted); font-size: 0.8em;
+  margin-right: 0.4em; text-transform: uppercase; letter-spacing: 0.5px; }
+.run-hero .chips { display: flex; gap: 0.35em; flex-wrap: wrap; align-items: center; }
+.run-hero .actions { display: flex; gap: 0.4em; flex-wrap: wrap; margin-top: 0.2em; }
+.run-hero .actions button { font-weight: 500; font-size: 0.82em; padding: 0.3em 0.7em; }
+.run-hero code.task-id { font-size: 0.85em; }
+
+/* Analyze: iteration timeline ------------------------------------------ */
+.timeline {
+  display: flex; gap: 0.35em; align-items: center; flex-wrap: wrap;
+  margin-bottom: 0.7em; font-size: 0.85em;
+}
+.timeline .step {
+  display: inline-flex; align-items: center; gap: 0.3em;
+  padding: 0.2em 0.65em; border-radius: 999px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  cursor: pointer; user-select: none;
+}
+.timeline .step.pass { border-color: rgba(110, 231, 183, 0.55); }
+.timeline .step.fail { border-color: rgba(255, 141, 161, 0.55); }
+.timeline .step.selected { outline: 2px solid var(--accent); }
+.timeline .step:hover { background: #232a37; }
+.timeline .step .dot {
+  display: inline-block; width: 0.6em; height: 0.6em; border-radius: 50%;
+  background: var(--muted);
+}
+.timeline .step.pass .dot { background: var(--ok); }
+.timeline .step.fail .dot { background: var(--err); }
+.timeline .arrow { color: var(--muted); }
+
+.iter h3 { margin: 0 0 0.3em 0; display: flex; gap: 0.5em; align-items: center; flex-wrap: wrap; }
+.iter .iter-summary { color: var(--fg); font-size: 0.92em; margin: 0.2em 0 0.5em 0; }
+.iter .changed-files { display: flex; gap: 0.3em; flex-wrap: wrap; margin: 0.2em 0; }
+.iter .changed-files code { background: var(--code); padding: 0.1em 0.5em; border-radius: 4px; font-size: 0.85em; }
+
+/* Diff renderer --------------------------------------------------------- */
+.diff {
+  background: var(--code); border: 1px solid var(--border);
+  border-radius: 6px; overflow: auto; font-size: 0.82em;
+  margin: 0.4em 0;
+}
+.diff pre { margin: 0; padding: 0; border: 0; background: transparent; max-height: none; }
+.diff .line { display: block; padding: 0 0.7em; white-space: pre; }
+.diff .line.add { background: rgba(110, 231, 183, 0.08); color: #b6f5d8; }
+.diff .line.del { background: rgba(255, 141, 161, 0.08); color: #ffc4cf; }
+.diff .line.hunk { color: var(--accent); background: rgba(122, 162, 255, 0.06); }
+.diff .line.meta { color: var(--muted); }
+.diff .empty { padding: 0.7em; color: var(--muted); font-style: italic; }
+
+/* Audit table ----------------------------------------------------------- */
+.audit-table { width: 100%; font-size: 0.85em; }
+.audit-table td { padding: 0.35em 0.55em; }
+.audit-table .ts { color: var(--muted); white-space: nowrap; font-family: ui-monospace, monospace; }
+.audit-table .cap { font-family: ui-monospace, monospace; }
+.audit-table .row-ok { /* default */ }
+.audit-table .row-error td:first-child { box-shadow: inset 3px 0 0 var(--err); }
+.audit-table .from-agent { color: var(--accent); font-size: 0.78em; }
+.audit-controls { gap: 0.5em; margin-bottom: 0.6em; }
+.audit-controls input { flex: 1 1 18em; }
+
+/* Misc -------------------------------------------------------------- */
+.copy-btn { font-size: 0.78em; padding: 0.15em 0.55em; }
+.attempt .attempt-body { margin-top: 0.4em; }
+.attempt .file-section summary { cursor: pointer; padding: 0.2em 0; color: var(--muted); }
+.attempt .file-section summary code { color: var(--fg); }
+.toast {
+  position: fixed; bottom: 1.2em; left: 50%; transform: translateX(-50%);
+  background: var(--panel-2); border: 1px solid var(--accent);
+  color: var(--fg); padding: 0.5em 0.9em; border-radius: 8px;
+  font-size: 0.85em; opacity: 0; transition: opacity 0.15s ease-in-out;
+  pointer-events: none; z-index: 1000;
+}
+.toast.show { opacity: 1; }
