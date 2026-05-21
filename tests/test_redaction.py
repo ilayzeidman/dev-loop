@@ -41,3 +41,21 @@ def test_private_key_block_redacted():
     src = "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"
     out = redact_text(src)
     assert "abc" not in out
+
+
+def test_connection_string_redacted():
+    out = redact_text("connect=postgres://user:secretpass@db:5432/app")
+    assert "secretpass" not in out
+    assert REDACTED in out
+
+
+def test_jwt_redacted():
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    out = redact_text(f"token={jwt}")
+    assert "eyJhbGc" not in out
+
+
+def test_signed_url_redacted():
+    url = "https://s3.example.com/bucket/key?X-Amz-Signature=abcdef1234567890&expires=1"
+    out = redact_text(url)
+    assert "abcdef" not in out

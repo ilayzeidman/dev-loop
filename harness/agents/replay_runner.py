@@ -22,13 +22,12 @@ Scenario layout (per design section 21):
 
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
-from ..util import read_json, read_text
+from ..util import read_json
 from .base import AgentPhase, AgentPhaseResult, AgentRunner
 
 

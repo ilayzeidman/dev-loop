@@ -49,12 +49,20 @@ def _run_allow_empty(args: list[str], cwd: Path) -> str:
 def extract_patch(workspace: Path, claimed_files: list[str] | None = None) -> PatchInfo:
     """Extract the real diff in ``workspace`` against HEAD.
 
-    Includes untracked files (via intent-to-add).
+    Includes untracked files (via intent-to-add). We take the porcelain
+    snapshot *before* ``git add -N .`` so we can distinguish files that
+    were untracked from files that were already staged/modified — once
+    intent-to-add runs, untracked files show as ``" A"``.
     """
+    pre_status = _run(["git", "status", "--porcelain=v1"], cwd=workspace)
+    untracked: list[str] = []
+    for line in pre_status.splitlines():
+        if line.startswith("?? "):
+            untracked.append(line[3:])
+
     _run(["git", "add", "-N", "."], cwd=workspace)
 
     status = _run(["git", "status", "--porcelain=v1"], cwd=workspace)
-    untracked: list[str] = []
     deleted: list[str] = []
     changed: list[str] = []
     # Porcelain v1 format: "XY<space>path[ -> rename]"
@@ -70,12 +78,11 @@ def extract_patch(workspace: Path, claimed_files: list[str] | None = None) -> Pa
             changed.append(new_p)
             continue
         path = rest
-        if code == "??":
-            untracked.append(path)
-        elif "D" in code:
+        if "D" in code:
             deleted.append(path)
             changed.append(path)
         else:
+            # Includes intent-to-add (was-untracked) and tracked changes.
             changed.append(path)
 
     diff = _run_allow_empty(["git", "diff", "HEAD", "--no-color"], cwd=workspace)

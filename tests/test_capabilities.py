@@ -54,6 +54,34 @@ def test_jenkins_forced_params_override(tmp_path: Path):
     assert res.data["production"] is False
 
 
+def test_denied_agent_calls_are_audited():
+    reg = load_default_registry()
+    seen: list[dict] = []
+    reg.set_audit_sink(seen.append)
+
+    # Agent calling a non-agent-requestable capability is denied AND audited.
+    reg.invoke("trigger_dev_jenkins_build", params={}, manifest={}, ctx={},
+               from_agent=True)
+    assert any(
+        r["capability"] == "trigger_dev_jenkins_build"
+        and r["from_agent"] is True
+        and r["status"] == "error"
+        for r in seen
+    ), seen
+
+    # Agent passing forbidden params is denied AND audited.
+    reg.invoke("query_elastic_for_current_run",
+               params={"environment": "prod"}, manifest={}, ctx={},
+               from_agent=True)
+    assert any(
+        r["capability"] == "query_elastic_for_current_run"
+        and r["from_agent"] is True
+        and r["status"] == "error"
+        and "forbidden" in (r["error"] or "").lower()
+        for r in seen
+    ), seen
+
+
 def test_replay_capabilities_read_scenario_files(tmp_path: Path):
     sc = tmp_path / "sc"
     sc.mkdir()

@@ -117,21 +117,29 @@ class CapabilityRegistry:
         ctx = ctx or {}
 
         if from_agent and not spec.agent_requestable:
-            return CapabilityResult(
+            result = CapabilityResult(
                 status="error",
                 error=f"capability '{name}' is not agent-requestable",
             )
+            if spec.audit:
+                self._audit(name=name, params=params, result=result, from_agent=True)
+            return result
 
         if from_agent:
             forbidden = _FORBIDDEN_FIELDS_FOR_AGENT.intersection(params.keys())
             if forbidden:
-                return CapabilityResult(
+                result = CapabilityResult(
                     status="error",
                     error=(
                         f"agent attempted to set forbidden params: "
                         f"{sorted(forbidden)}"
                     ),
                 )
+                if spec.audit:
+                    self._audit(
+                        name=name, params=params, result=result, from_agent=True,
+                    )
+                return result
 
         # forced params override anything else; this is the dev-only safety
         # net for Jenkins and similar.

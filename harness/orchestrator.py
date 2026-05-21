@@ -29,7 +29,7 @@ from .policy import (
 from .redaction import redact
 from .report import render_review_report
 from .triage import build_failure_dossier
-from .util import sha256_text, utc_now_iso, write_json, write_text
+from .util import utc_now_iso, write_json, write_text
 
 
 @dataclass
@@ -130,12 +130,14 @@ class Orchestrator:
         prev_failure_dossier: dict[str, Any] | None = None
         prev_iteration_summary: dict[str, Any] | None = None
         loop_done = False
+        hit_stop_reason: str | None = None
 
         for iteration in range(1, self.cfg.policy.max_code_iterations + 1):
             stop_reason = check_stop_conditions(
                 policy=self.cfg.policy, state=self.state, last_triage=last_triage,
             )
             if stop_reason:
+                hit_stop_reason = stop_reason
                 ledger.update_task_manifest(status="stopped", stop_reason=stop_reason)
                 break
 
@@ -176,6 +178,7 @@ class Orchestrator:
             loop_done=loop_done,
             selected_iteration=selected_iteration,
             last_triage=last_triage,
+            hit_stop_reason=hit_stop_reason,
         )
 
         report_path = self._write_report(
@@ -727,9 +730,27 @@ class Orchestrator:
         loop_done: bool,
         selected_iteration: int | None,
         last_triage: dict[str, Any] | None,
+        hit_stop_reason: str | None = None,
     ) -> str:
         if loop_done and selected_iteration is not None:
             return "passed"
+        # Hard stop conditions from policy.check_stop_conditions get
+        # priority over whatever the agent's last triage said.
+        if hit_stop_reason == "budget_exceeded":
+            return "failed_budget_exceeded"
+        if hit_stop_reason == "max_code_iterations_reached":
+            return "failed_budget_exceeded"
+        if hit_stop_reason == "same_failure_fingerprint_after_2_code_iterations":
+            return "failed_stop_condition"
+        if hit_stop_reason == "agent_requested_human":
+            return "failed_human_required"
+        if hit_stop_reason == "agent_stopped_inconclusive":
+            return "failed_inconclusive"
+        if hit_stop_reason in (
+            "environment_issue_declared",
+            "harness_issue_declared",
+        ):
+            return "failed_stop_condition"
         if last_triage is not None:
             action = last_triage.get("next_action")
             if action == "ask_human":
