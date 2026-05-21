@@ -84,7 +84,7 @@ surface.
     patch.diff
     changed_files.json
     ai_calls/
-      001_implementation/{input,output,raw_provider_log}
+      001_implementation/{input,output,raw_provider_log,metadata}
     validations/attempt-001/
       run_manifest.json
       local_build.json
@@ -119,7 +119,22 @@ dev-loop runs diff last-1 last     # compare the previous run to the newest
 `runs show` prints the iteration timeline (e2e status, attempt count,
 patch hash, file count, agent summary) and the paths to the structured
 and markdown final reports so you can pipe straight into `less` or open
-in an editor without digging through `.dev-loop/runs/`.
+in an editor without digging through `.dev-loop/runs/`. The output also
+embeds a per-iteration AI-call summary (`provider`, `returncode`,
+`stderr_tail`, `argv`) sourced from `ai_calls/NNN/metadata.json`, so the
+CLI sees the same telemetry the Analyze tab's AI-call drilldown surfaces.
+
+### Crash-safe ledger
+
+Every run finalizes its `task_manifest.json` even when interrupted. If you
+press `Ctrl+C` (or the orchestrator's contract phase dies mid-flight) the
+manifest is rewritten with `status: aborted`, `final_status:
+failed_inconclusive`, and `interrupted: true` before the signal is
+re-raised; the CLI then exits with code 130. `runs ls` collapses the
+manifest into a single `effective_status` bucket (`aborted` for a
+mid-flight ghost, `final_status` when the run reached the report writer)
+and flags `(interrupted)` in the status column, so a killed run is never
+indistinguishable from one that's still executing.
 
 `runs diff` is the headless analog of the Analyze tab's compare view:
 side-by-side header (final status, iterations, duration, audit total,
