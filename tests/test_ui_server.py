@@ -455,6 +455,156 @@ def test_bundle_import_respects_include_filter(tmp_path: Path):
         assert not (tmp_path / ".dev-loop" / "config.yaml").exists()
 
 
+def test_config_validate_endpoint_resolves_paths(tmp_path: Path):
+    """The validate endpoint should resolve relative paths against the repo
+    root so the Build > Config preview shows the real on-disk targets."""
+    with _server(tmp_path) as (port, _):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/config/validate",
+            method="POST", data=b"runs_dir: my-runs\n",
+        )
+        with urllib.request.urlopen(req, timeout=2) as r:
+            body = json.loads(r.read().decode("utf-8"))
+        # ``my-runs`` should be resolved to an absolute path under tmp_path.
+        assert body["resolved"]["runs_dir"].endswith("my-runs")
+        assert str(tmp_path) in body["resolved"]["runs_dir"]
+
+
+def test_config_validate_endpoint_round_trip(tmp_path: Path):
+    """Posting a clean YAML body returns ``ok: True`` and a populated form."""
+    with _server(tmp_path) as (port, _):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/config/validate",
+            method="POST",
+            data=b"default_provider: claude\npolicy:\n  max_code_iterations: 7\n",
+        )
+        with urllib.request.urlopen(req, timeout=2) as r:
+            body = json.loads(r.read().decode("utf-8"))
+        assert body["ok"] is True
+        assert body["issues"] == []
+        assert body["form"]["default_provider"] == "claude"
+        assert body["form"]["max_code_iterations"] == 7
+        assert body["resolved"]["policy"]["max_code_iterations"] == 7
+        # Nothing was written.
+        assert not (tmp_path / ".dev-loop" / "config.yaml").exists()
+
+
+def test_config_validate_endpoint_surfaces_yaml_error(tmp_path: Path):
+    """A YAML parse error returns 200 with a structured issue, not 500."""
+    with _server(tmp_path) as (port, _):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/config/validate",
+            method="POST", data=b": :\n  bogus: [unterminated",
+        )
+        with urllib.request.urlopen(req, timeout=2) as r:
+            body = json.loads(r.read().decode("utf-8"))
+        assert body["ok"] is False
+        assert any(i["level"] == "error" for i in body["issues"])
+        assert any("YAML" in i["message"] or "yaml" in i["message"]
+                   for i in body["issues"])
+
+
+def test_config_validate_endpoint_surfaces_field_errors(tmp_path: Path):
+    """A bad scalar (e.g. negative iterations) shows up as a field-level error."""
+    with _server(tmp_path) as (port, _):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/config/validate",
+            method="POST",
+            data=b"policy:\n  max_code_iterations: 0\n",
+        )
+        with urllib.request.urlopen(req, timeout=2) as r:
+            body = json.loads(r.read().decode("utf-8"))
+        assert body["ok"] is False
+        errs = [i for i in body["issues"] if i["level"] == "error"]
+        assert any(i["field"] == "max_code_iterations" for i in errs)
+
+
+def test_config_validate_endpoint_warns_on_unknown_provider(tmp_path: Path):
+    """A typo in default_provider is a warning, not an error — the loop
+    will still try to dispatch and surface the real error there."""
+    with _server(tmp_path) as (port, _):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/config/validate",
+            method="POST", data=b"default_provider: glaude\n",
+        )
+        with urllib.request.urlopen(req, timeout=2) as r:
+            body = json.loads(r.read().decode("utf-8"))
+        # Still ok=True (no errors), but a warning.
+        assert body["ok"] is True
+        warns = [i for i in body["issues"] if i["level"] == "warning"]
+        assert any(i["field"] == "default_provider" for i in warns)
+
+
+def test_config_form_endpoint_renders_canonical_yaml(tmp_path: Path):
+    """Posting the form dict produces YAML that, parsed, equals the form."""
+    with _server(tmp_path) as (port, _):
+        status, body = _post_json(port, "/api/config/form", {
+            "default_provider": "claude",
+            "runs_dir": ".dev-loop/runs",
+            "max_code_iterations": 9,
+        })
+        assert status == 200
+        assert body["ok"] is True
+        assert "default_provider: claude" in body["yaml"]
+        # And the round-trip works: validate the YAML and the form matches.
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/config/validate",
+            method="POST", data=body["yaml"].encode("utf-8"),
+        )
+        with urllib.request.urlopen(req, timeout=2) as r:
+            v = json.loads(r.read().decode("utf-8"))
+        assert v["ok"] is True
+        assert v["form"]["default_provider"] == "claude"
+        assert v["form"]["max_code_iterations"] == 9
+
+
+def test_config_form_endpoint_does_not_write(tmp_path: Path):
+    """The form endpoint is pure — generating YAML must not touch disk."""
+    with _server(tmp_path) as (port, _):
+        _post_json(port, "/api/config/form", {"default_provider": "codex"})
+        assert not (tmp_path / ".dev-loop" / "config.yaml").exists()
+
+
+def test_config_form_endpoint_rejects_non_object(tmp_path: Path):
+    import urllib.error
+    with _server(tmp_path) as (port, _):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/config/form",
+            method="POST", data=b'"hi"',
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=2)
+            raise AssertionError("expected HTTPError")
+        except urllib.error.HTTPError as e:
+            assert e.code == 400
+
+
+def test_config_validate_then_save_round_trip(tmp_path: Path):
+    """The form -> YAML -> save -> reload chain matches what the form sent."""
+    with _server(tmp_path) as (port, _):
+        # Render canonical YAML from a form dict.
+        _, form_resp = _post_json(port, "/api/config/form", {
+            "default_provider": "claude",
+            "max_code_iterations": 11,
+            "max_total_wall_clock_minutes": 30,
+        })
+        yaml_text = form_resp["yaml"]
+        # Save that YAML to disk via the existing POST /api/config/raw.
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/config/raw",
+            method="POST", data=yaml_text.encode("utf-8"),
+        )
+        with urllib.request.urlopen(req, timeout=2) as r:
+            assert r.status == 200
+        # Re-read /api/config and check the values stuck.
+        _, body = _get(port, "/api/config")
+        data = json.loads(body)
+        assert data["default_provider"] == "claude"
+        assert data["policy"]["max_code_iterations"] == 11
+        assert data["policy"]["max_total_wall_clock_minutes"] == 30
+
+
 def test_scenario_create_blocks_dotdot_name(tmp_path: Path):
     """The create endpoint must also reject ``..`` (its existing check did
     via ``startswith('.')``; this pins that behaviour)."""

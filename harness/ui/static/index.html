@@ -102,15 +102,141 @@
         <div class="panel hidden" id="builder-config">
           <h2>Repository config</h2>
           <p class="muted" id="cfg-file"></p>
-          <textarea id="cfg-textarea" rows="20" spellcheck="false"></textarea>
-          <div class="row">
+
+          <div class="cfg-mode-tabs">
+            <button data-cfg-mode="form" class="active">Form</button>
+            <button data-cfg-mode="yaml">Raw YAML</button>
+            <span class="muted" id="cfg-dirty-pill"></span>
+          </div>
+
+          <!-- Structured form ------------------------------------------- -->
+          <form id="cfg-form" class="cfg-form" autocomplete="off">
+
+            <section class="cfg-group">
+              <h3>Provider &amp; paths</h3>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-default_provider">Default provider</label>
+                <select id="cfgf-default_provider" name="default_provider">
+                  <option value="replay">replay (deterministic playback)</option>
+                  <option value="claude">claude (Claude Code CLI)</option>
+                  <option value="codex">codex (Codex CLI)</option>
+                </select>
+                <div class="cfg-help">Which agent runs when <code>--provider</code> is not passed.</div>
+              </div>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-runs_dir">Runs directory</label>
+                <input id="cfgf-runs_dir" name="runs_dir" type="text"
+                  placeholder=".dev-loop/runs">
+                <div class="cfg-help">Where per-task artifacts and the audit trail go. Relative paths resolve from the repo root.</div>
+              </div>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-scenarios_dir">Scenarios directory</label>
+                <input id="cfgf-scenarios_dir" name="scenarios_dir" type="text"
+                  placeholder="scenarios">
+                <div class="cfg-help">Where replay scenarios live, relative to the repo root.</div>
+              </div>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-sandbox_dir">Sandbox directory <span class="cfg-optional">(optional)</span></label>
+                <input id="cfgf-sandbox_dir" name="sandbox_dir" type="text"
+                  placeholder="(system tempdir)">
+                <div class="cfg-help">Disposable workspace where the agent runs. Leave blank to use the system tempdir.</div>
+              </div>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-clean_workspace_dir">Clean workspace directory <span class="cfg-optional">(optional)</span></label>
+                <input id="cfgf-clean_workspace_dir" name="clean_workspace_dir" type="text"
+                  placeholder="(system tempdir)">
+                <div class="cfg-help">Where the clean reapply happens. Leave blank to use the system tempdir.</div>
+              </div>
+            </section>
+
+            <section class="cfg-group">
+              <h3>Loop policy</h3>
+              <p class="muted cfg-section-blurb">Caps on how hard the loop will try before stopping.</p>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-max_code_iterations">Max code iterations</label>
+                <div class="cfg-num-row">
+                  <input id="cfgf-max_code_iterations" name="max_code_iterations"
+                    type="number" min="1" max="50" step="1">
+                  <span class="muted">iterations</span>
+                </div>
+                <div class="cfg-help">How many "modify code, re-validate" rounds before declaring stop. Typical: 3–8.</div>
+              </div>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-max_validation_attempts_per_iteration">Validation attempts per iteration</label>
+                <div class="cfg-num-row">
+                  <input id="cfgf-max_validation_attempts_per_iteration"
+                    name="max_validation_attempts_per_iteration"
+                    type="number" min="1" max="20" step="1">
+                  <span class="muted">attempts</span>
+                </div>
+                <div class="cfg-help">How many times to retry validation within a single iteration (e.g. flaky-test reruns).</div>
+              </div>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-max_diagnostic_rounds_per_failure">Diagnostic rounds per failure</label>
+                <div class="cfg-num-row">
+                  <input id="cfgf-max_diagnostic_rounds_per_failure"
+                    name="max_diagnostic_rounds_per_failure"
+                    type="number" min="1" max="20" step="1">
+                  <span class="muted">rounds</span>
+                </div>
+                <div class="cfg-help">How many diagnostic-fetch rounds before the loop is forced to make a code decision.</div>
+              </div>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-max_total_wall_clock_minutes">Wall-clock budget</label>
+                <div class="cfg-num-row">
+                  <input id="cfgf-max_total_wall_clock_minutes"
+                    name="max_total_wall_clock_minutes"
+                    type="number" min="1" max="1440" step="1">
+                  <span class="muted">minutes</span>
+                </div>
+                <div class="cfg-help">Hard budget for the whole loop. The orchestrator stops once exceeded.</div>
+              </div>
+            </section>
+
+            <section class="cfg-group">
+              <h3>Notes <span class="cfg-optional">(optional)</span></h3>
+              <textarea id="cfgf-notes" name="notes" rows="3"
+                placeholder="Free-form notes about this setup (surfaced in the harness profile)."></textarea>
+            </section>
+          </form>
+
+          <!-- Raw YAML editor (toggle) ---------------------------------- -->
+          <div id="cfg-yaml-pane" class="hidden">
+            <textarea id="cfg-textarea" rows="22" spellcheck="false"></textarea>
+            <p class="muted cfg-yaml-blurb">
+              Round-trip back to the form with the "Form" tab above. Comments
+              and uncommented overrides are both preserved.
+            </p>
+          </div>
+
+          <!-- Validation banner -------------------------------------- -->
+          <div id="cfg-issues" class="cfg-issues hidden"></div>
+
+          <!-- Actions --------------------------------------------------- -->
+          <div class="row cfg-actions">
             <button id="cfg-save">Save</button>
-            <button id="cfg-reload" class="secondary">Reload</button>
+            <button id="cfg-revert" class="secondary">Revert</button>
+            <button id="cfg-test" class="secondary" title="Re-run validation now">Test config</button>
             <span id="cfg-status"></span>
           </div>
-          <details>
-            <summary>Resolved values</summary>
-            <pre id="cfg-resolved"></pre>
+
+          <!-- Resolved preview ----------------------------------------- -->
+          <details class="cfg-resolved-wrap" open>
+            <summary>Resolved values <span class="muted">(what the loop will actually use)</span></summary>
+            <div id="cfg-resolved-pretty" class="cfg-resolved-pretty"></div>
+            <details>
+              <summary class="muted">as JSON</summary>
+              <pre id="cfg-resolved"></pre>
+            </details>
           </details>
         </div>
 

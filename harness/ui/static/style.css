@@ -302,6 +302,108 @@ button:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
 }
 .toast.show { opacity: 1; }
 
+/* Build > Config form --------------------------------------------------- */
+.cfg-mode-tabs {
+  display: flex; gap: 0.3em; margin: 0.4em 0 0.9em 0; align-items: center;
+}
+.cfg-mode-tabs button {
+  background: var(--panel-2); color: var(--fg);
+  border: 1px solid var(--border); font-weight: 500; font-size: 0.85em;
+  padding: 0.35em 0.9em; border-radius: 6px;
+}
+.cfg-mode-tabs button.active {
+  background: var(--accent); color: #0b0d12;
+  border-color: var(--accent); font-weight: 600;
+}
+#cfg-dirty-pill { font-size: 0.78em; margin-left: 0.5em; }
+#cfg-dirty-pill.dirty { color: var(--warn); }
+
+.cfg-form { display: grid; gap: 1.2em; }
+.cfg-form.hidden { display: none; }
+.cfg-group {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 0.85em 1em; background: var(--panel-2);
+}
+.cfg-group h3 { margin: 0 0 0.7em 0; font-size: 0.95em; }
+.cfg-section-blurb { font-size: 0.85em; margin: -0.3em 0 0.8em 0; }
+.cfg-optional { color: var(--muted); font-weight: 400; font-size: 0.8em; }
+
+.cfg-field {
+  margin-bottom: 0.9em;
+  padding: 0.5em 0.7em;
+  border-left: 3px solid transparent;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+.cfg-field:last-child { margin-bottom: 0; }
+.cfg-field.warn  { border-left-color: var(--warn);
+  background: rgba(255, 209, 102, 0.06); }
+.cfg-field.error { border-left-color: var(--err);
+  background: rgba(255, 141, 161, 0.08); }
+.cfg-field .cfg-label {
+  display: block; font-weight: 600; font-size: 0.85em;
+  color: var(--fg); text-transform: none; letter-spacing: 0;
+  margin-bottom: 0.3em;
+}
+.cfg-field input[type=text], .cfg-field input[type=number],
+.cfg-field select, .cfg-field textarea {
+  width: 100%; background: var(--code);
+}
+.cfg-num-row { display: flex; gap: 0.5em; align-items: center; }
+.cfg-num-row input[type=number] { max-width: 9em; }
+.cfg-help { color: var(--muted); font-size: 0.82em; margin-top: 0.3em;
+  line-height: 1.45; }
+
+.cfg-issues {
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 0.5em 0.7em; margin: 0.8em 0;
+  background: var(--panel-2);
+}
+.cfg-issues-list { list-style: none; padding: 0; margin: 0; }
+.cfg-issue { display: flex; gap: 0.55em; align-items: baseline;
+  padding: 0.2em 0; font-size: 0.88em; }
+.cfg-issue-mark {
+  display: inline-block; width: 1.2em; text-align: center;
+  font-weight: 700; flex-shrink: 0;
+}
+.cfg-issue-error .cfg-issue-mark { color: var(--err); }
+.cfg-issue-warn  .cfg-issue-mark { color: var(--warn); }
+.cfg-issue-field {
+  background: var(--code); padding: 0.05em 0.4em; border-radius: 3px;
+  font-size: 0.85em; flex-shrink: 0;
+}
+
+.cfg-actions { margin-top: 1em; }
+.cfg-yaml-blurb { font-size: 0.82em; margin-top: 0.3em; }
+#cfg-yaml-pane.hidden { display: none; }
+#cfg-textarea { font-size: 0.85em; }
+
+.cfg-resolved-wrap { margin-top: 1em; }
+.cfg-resolved-wrap > summary { cursor: pointer; padding: 0.3em 0; }
+.cfg-resolved-pretty { margin: 0.6em 0 0.4em 0; }
+.cfg-resolved-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 1em;
+}
+@media (max-width: 720px) {
+  .cfg-resolved-grid { grid-template-columns: 1fr; }
+}
+.cfg-resolved-col {
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 0.6em 0.8em; background: var(--panel-2);
+}
+.cfg-resolved-col h4 {
+  margin: 0 0 0.4em 0; font-size: 0.78em;
+  color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px;
+}
+.kv-row {
+  display: grid; grid-template-columns: minmax(0, 12em) 1fr; gap: 0.6em;
+  align-items: baseline; padding: 0.15em 0; font-size: 0.85em;
+}
+.kv-k { color: var(--muted); }
+.kv-v code { background: var(--code); padding: 0.05em 0.45em;
+  border-radius: 3px; word-break: break-all; }
+.cfg-resolved-notes { font-size: 0.82em; margin-top: 0.5em; }
+
 /* Share & reuse (bundles) ------------------------------------------------ */
 .share-section {
   border-top: 1px solid var(--border);

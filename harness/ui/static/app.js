@@ -175,25 +175,275 @@ function selectBuilder(name) {
 
 function refreshBuildOverview() { /* static */ }
 
+// Config form state. Holds the last text the server gave us (so "Revert"
+// goes back to that exact bytes), the current form values, and a debounce
+// handle for live validation as the user types.
+const CFG_FORM_FIELDS = [
+  "default_provider", "runs_dir", "scenarios_dir",
+  "sandbox_dir", "clean_workspace_dir", "notes",
+  "max_code_iterations", "max_validation_attempts_per_iteration",
+  "max_diagnostic_rounds_per_failure", "max_total_wall_clock_minutes",
+];
+const CFG_INT_FIELDS = new Set([
+  "max_code_iterations", "max_validation_attempts_per_iteration",
+  "max_diagnostic_rounds_per_failure", "max_total_wall_clock_minutes",
+]);
+let CFG_SAVED_TEXT = "";        // bytes currently on disk (per last load/save)
+let CFG_SAVED_FORM = null;      // {field: value} matching CFG_SAVED_TEXT
+let CFG_MODE = "form";          // "form" | "yaml"
+let CFG_VALIDATE_TIMER = null;
+let CFG_LAST_VALIDATION = null;
+
 async function refreshBuildConfig() {
   $("#cfg-file").textContent = RESOLVED ? RESOLVED.config_file : "";
   const text = await getText("/api/config/raw");
+  CFG_SAVED_TEXT = text;
   $("#cfg-textarea").value = text;
-  $("#cfg-resolved").textContent = JSON.stringify(RESOLVED, null, 2);
+  // Ask the server to parse the YAML into a form dict so we don't have to
+  // ship a YAML parser to the browser.
+  const v = await postText("/api/config/validate", text);
+  CFG_SAVED_FORM = v.form || {};
+  populateConfigForm(CFG_SAVED_FORM);
+  renderCfgValidation(v);
+  $("#cfg-resolved").textContent = JSON.stringify(v.resolved, null, 2);
+  renderResolvedPretty(v.resolved);
+  setCfgDirty(false);
+  $("#cfg-status").textContent = "";
 }
+
+function populateConfigForm(form) {
+  for (const f of CFG_FORM_FIELDS) {
+    const el = $(`#cfgf-${f}`);
+    if (!el) continue;
+    const v = form[f];
+    const s = (v === undefined || v === null) ? "" : String(v);
+    // If a <select> is given a value that isn't one of its options, inject
+    // a transient option so the user can see the actual saved value rather
+    // than the browser silently snapping to option[0].
+    if (el.tagName === "SELECT" && s &&
+        !Array.from(el.options).some(o => o.value === s)) {
+      const opt = document.createElement("option");
+      opt.value = s; opt.textContent = `${s} (not built-in)`;
+      opt.dataset.custom = "1";
+      el.appendChild(opt);
+    }
+    el.value = s;
+  }
+}
+
+function readConfigForm() {
+  const out = {};
+  for (const f of CFG_FORM_FIELDS) {
+    const el = $(`#cfgf-${f}`);
+    if (!el) continue;
+    const raw = el.value;
+    if (CFG_INT_FIELDS.has(f)) {
+      if (raw === "" || raw == null) continue;
+      const n = Number(raw);
+      out[f] = Number.isFinite(n) ? n : raw;
+    } else {
+      out[f] = raw;
+    }
+  }
+  return out;
+}
+
+function setCfgDirty(dirty) {
+  const pill = $("#cfg-dirty-pill");
+  if (!pill) return;
+  pill.textContent = dirty ? "● unsaved changes" : "";
+  pill.classList.toggle("dirty", !!dirty);
+}
+
+function currentCfgYaml() {
+  return CFG_MODE === "yaml" ? $("#cfg-textarea").value : null;
+}
+
+async function validateCfgNow() {
+  let payload, text;
+  if (CFG_MODE === "yaml") {
+    text = $("#cfg-textarea").value;
+    payload = await postText("/api/config/validate", text);
+  } else {
+    const form = readConfigForm();
+    payload = await postJSON("/api/config/form", form);
+    // The server returns canonical YAML — keep the raw editor in sync so
+    // flipping tabs is always a no-op (no surprise reformat).
+    if (payload.yaml != null) $("#cfg-textarea").value = payload.yaml;
+    text = payload.yaml || "";
+  }
+  CFG_LAST_VALIDATION = payload;
+  renderCfgValidation(payload);
+  renderResolvedPretty(payload.resolved);
+  $("#cfg-resolved").textContent = JSON.stringify(payload.resolved, null, 2);
+  setCfgDirty(text !== CFG_SAVED_TEXT);
+  return payload;
+}
+
+function scheduleCfgValidate() {
+  if (CFG_VALIDATE_TIMER) clearTimeout(CFG_VALIDATE_TIMER);
+  CFG_VALIDATE_TIMER = setTimeout(() => {
+    validateCfgNow().catch(e => {
+      $("#cfg-status").textContent = "validation error: " + e;
+    });
+  }, 250);
+}
+
+function renderCfgValidation(payload) {
+  const box = $("#cfg-issues");
+  if (!box) return;
+  // Clear per-field marks.
+  $$(".cfg-field.error, .cfg-field.warn").forEach(el =>
+    el.classList.remove("error", "warn"));
+  const issues = (payload && payload.issues) || [];
+  if (!issues.length) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    $("#cfg-save").disabled = false;
+    return;
+  }
+  const items = issues.map(i => {
+    const cls = i.level === "error" ? "error" : "warn";
+    const fieldHtml = i.field && i.field !== "_root" && i.field !== "_yaml"
+      ? `<code class="cfg-issue-field">${escapeHtml(i.field)}</code>`
+      : "";
+    return `<li class="cfg-issue cfg-issue-${cls}">
+      <span class="cfg-issue-mark">${i.level === "error" ? "✗" : "!"}</span>
+      ${fieldHtml}<span>${escapeHtml(i.message)}</span>
+    </li>`;
+  }).join("");
+  box.classList.remove("hidden");
+  box.innerHTML = `<ul class="cfg-issues-list">${items}</ul>`;
+  // Highlight the offending form fields too.
+  for (const i of issues) {
+    const fname = (i.field || "").split(".").pop();
+    const fld = $(`#cfgf-${fname}`);
+    if (fld) {
+      const wrap = fld.closest(".cfg-field");
+      if (wrap) wrap.classList.add(i.level === "error" ? "error" : "warn");
+    }
+  }
+  $("#cfg-save").disabled = issues.some(i => i.level === "error");
+}
+
+function renderResolvedPretty(resolved) {
+  const root = $("#cfg-resolved-pretty");
+  if (!root) return;
+  if (!resolved) { root.innerHTML = ""; return; }
+  const r = resolved;
+  const rows = [
+    ["runs dir", r.runs_dir],
+    ["scenarios dir", r.scenarios_dir],
+    ["sandbox dir", r.sandbox_dir],
+    ["clean workspace dir", r.clean_workspace_dir],
+    ["default provider", r.default_provider],
+  ];
+  const policy = r.policy || {};
+  const policyRows = [
+    ["max code iterations", policy.max_code_iterations],
+    ["max validation attempts / iter", policy.max_validation_attempts_per_iteration],
+    ["max diagnostic rounds / failure", policy.max_diagnostic_rounds_per_failure],
+    ["wall-clock budget", policy.max_total_wall_clock_minutes + " min"],
+  ];
+  const fmt = rs => rs.map(([k, v]) =>
+    `<div class="kv-row"><span class="kv-k">${escapeHtml(k)}</span><span class="kv-v"><code>${escapeHtml(String(v))}</code></span></div>`
+  ).join("");
+  root.innerHTML = `
+    <div class="cfg-resolved-grid">
+      <div class="cfg-resolved-col">
+        <h4>Paths &amp; provider</h4>${fmt(rows)}
+      </div>
+      <div class="cfg-resolved-col">
+        <h4>Loop policy</h4>${fmt(policyRows)}
+      </div>
+    </div>
+    ${r.notes ? `<p class="muted cfg-resolved-notes"><strong>notes:</strong> ${escapeHtml(r.notes)}</p>` : ""}
+  `;
+}
+
+// ---- form/yaml mode toggle --------------------------------------------
+$$('.cfg-mode-tabs button[data-cfg-mode]').forEach(b => {
+  b.addEventListener("click", async () => {
+    const mode = b.dataset.cfgMode;
+    if (mode === CFG_MODE) return;
+    // Before switching, sync the destination pane's state from the source.
+    try { await validateCfgNow(); } catch (_) {}
+    CFG_MODE = mode;
+    $$('.cfg-mode-tabs button[data-cfg-mode]').forEach(x =>
+      x.classList.toggle("active", x.dataset.cfgMode === mode));
+    $("#cfg-form").classList.toggle("hidden", mode !== "form");
+    $("#cfg-yaml-pane").classList.toggle("hidden", mode !== "yaml");
+    if (mode === "form" && CFG_LAST_VALIDATION && CFG_LAST_VALIDATION.form) {
+      populateConfigForm(CFG_LAST_VALIDATION.form);
+    }
+  });
+});
+
+// ---- form field listeners (debounced live validation) -----------------
+CFG_FORM_FIELDS.forEach(f => {
+  const el = document.getElementById(`cfgf-${f}`);
+  if (!el) return;
+  const handler = () => scheduleCfgValidate();
+  el.addEventListener("input", handler);
+  el.addEventListener("change", handler);
+});
+const cfgTa = document.getElementById("cfg-textarea");
+if (cfgTa) cfgTa.addEventListener("input", scheduleCfgValidate);
+
+// ---- save / revert / test ---------------------------------------------
 $("#cfg-save").addEventListener("click", async () => {
-  const text = $("#cfg-textarea").value;
   $("#cfg-status").textContent = "saving…";
   try {
-    await postText("/api/config/raw", text);
+    // Always save via canonical YAML so the form-edit and the raw-edit paths
+    // end up with the same on-disk shape.
+    let payload;
+    if (CFG_MODE === "yaml") {
+      payload = await postText("/api/config/validate", $("#cfg-textarea").value);
+    } else {
+      payload = await postJSON("/api/config/form", readConfigForm());
+      $("#cfg-textarea").value = payload.yaml || "";
+    }
+    if (!payload.ok) {
+      $("#cfg-status").textContent = "fix errors above to save";
+      return;
+    }
+    const yaml = CFG_MODE === "yaml" ? $("#cfg-textarea").value : payload.yaml;
+    await postText("/api/config/raw", yaml);
+    CFG_SAVED_TEXT = yaml;
+    CFG_SAVED_FORM = payload.form;
     await loadConfig();
+    setCfgDirty(false);
     $("#cfg-status").textContent = "saved ✓";
-    $("#cfg-resolved").textContent = JSON.stringify(RESOLVED, null, 2);
   } catch (e) {
     $("#cfg-status").textContent = "error: " + e;
   }
 });
-$("#cfg-reload").addEventListener("click", refreshBuildConfig);
+
+$("#cfg-revert").addEventListener("click", async () => {
+  $("#cfg-textarea").value = CFG_SAVED_TEXT;
+  if (CFG_SAVED_FORM) populateConfigForm(CFG_SAVED_FORM);
+  await validateCfgNow();
+  $("#cfg-status").textContent = "reverted";
+  setCfgDirty(false);
+});
+
+$("#cfg-test").addEventListener("click", async () => {
+  $("#cfg-status").textContent = "validating…";
+  try {
+    const payload = await validateCfgNow();
+    if (payload.ok) {
+      const warns = (payload.issues || []).filter(i => i.level === "warning").length;
+      $("#cfg-status").textContent = warns
+        ? `valid ✓ (${warns} warning${warns !== 1 ? "s" : ""})`
+        : "valid ✓";
+    } else {
+      const errs = (payload.issues || []).filter(i => i.level === "error").length;
+      $("#cfg-status").textContent = `${errs} error${errs !== 1 ? "s" : ""} — see above`;
+    }
+  } catch (e) {
+    $("#cfg-status").textContent = "error: " + e;
+  }
+});
 
 async function refreshBuildCapabilities() {
   const tbody = $("#cap-table tbody");

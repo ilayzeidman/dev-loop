@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from harness.config import CONFIG_DIR_NAME, CONFIG_FILE_NAME, HarnessConfig
+import yaml
+
+from harness.config import (
+    CONFIG_DIR_NAME,
+    CONFIG_FILE_NAME,
+    HarnessConfig,
+    dump_canonical_yaml,
+)
 
 
 def test_defaults_when_no_file(tmp_path: Path):
@@ -70,3 +77,81 @@ def test_from_dict_does_not_mutate_caller(tmp_path: Path):
     snapshot = {"policy": {"max_code_iterations": 3}, "default_provider": "claude"}
     HarnessConfig.from_dict(raw)
     assert raw == snapshot
+
+
+def test_from_dict_with_issues_flags_bad_int():
+    cfg, issues = HarnessConfig.from_dict_with_issues(
+        {"max_code_iterations": "many"}
+    )
+    errors = [i for i in issues if i["level"] == "error"]
+    assert any(i["field"] == "max_code_iterations" for i in errors)
+    assert cfg.max_code_iterations == 5  # default kept
+
+
+def test_from_dict_with_issues_warns_on_unknown_keys():
+    _, issues = HarnessConfig.from_dict_with_issues({"foo": 1, "policy": {"bar": 2}})
+    fields = {i["field"] for i in issues if i["level"] == "warning"}
+    assert "foo" in fields
+    assert "policy.bar" in fields
+
+
+def test_from_dict_with_issues_warns_on_unknown_provider():
+    _, issues = HarnessConfig.from_dict_with_issues({"default_provider": "vinyl"})
+    assert any(
+        i["level"] == "warning" and i["field"] == "default_provider"
+        for i in issues
+    )
+
+
+def test_from_dict_with_issues_flags_zero_iterations():
+    _, issues = HarnessConfig.from_dict_with_issues(
+        {"max_code_iterations": 0}
+    )
+    assert any(
+        i["level"] == "error" and i["field"] == "max_code_iterations"
+        for i in issues
+    )
+
+
+def test_from_dict_with_issues_clean_config():
+    _, issues = HarnessConfig.from_dict_with_issues({
+        "default_provider": "claude",
+        "policy": {"max_code_iterations": 7},
+    })
+    # No errors, no warnings on a perfectly valid config.
+    assert issues == []
+
+
+def test_dump_canonical_yaml_roundtrips_defaults():
+    cfg = HarnessConfig()
+    text = dump_canonical_yaml(cfg)
+    parsed = yaml.safe_load(text) or {}
+    cfg2 = HarnessConfig.from_dict(parsed)
+    # Pure-default config loads back as defaults — every override line in
+    # the canonical YAML is commented out so ``yaml.safe_load`` sees nothing.
+    assert cfg2.max_code_iterations == cfg.max_code_iterations
+    assert cfg2.default_provider == cfg.default_provider
+
+
+def test_dump_canonical_yaml_roundtrips_overrides():
+    cfg = HarnessConfig(
+        default_provider="claude",
+        runs_dir=".runs",
+        max_code_iterations=12,
+        max_total_wall_clock_minutes=60,
+    )
+    text = dump_canonical_yaml(cfg)
+    cfg2 = HarnessConfig.from_dict(yaml.safe_load(text))
+    assert cfg2.default_provider == "claude"
+    assert cfg2.runs_dir == ".runs"
+    assert cfg2.max_code_iterations == 12
+    assert cfg2.max_total_wall_clock_minutes == 60
+
+
+def test_dump_canonical_yaml_quotes_strings_with_colons():
+    """``runs_dir: .dev-loop/runs`` is a YAML string but ``a: b: c`` would
+    look like two mappings — the dumper must quote strings safely."""
+    cfg = HarnessConfig(notes="see config: yaml{}")
+    text = dump_canonical_yaml(cfg)
+    parsed = yaml.safe_load(text)
+    assert parsed["notes"] == "see config: yaml{}"

@@ -28,6 +28,8 @@ Read endpoints
 
 Write endpoints
   POST /api/config/raw                   replace config.yaml
+  POST /api/config/validate              dry-run a YAML body (no write)
+  POST /api/config/form                  render canonical YAML from a form dict
   POST /api/init                         one-click onboarding (config + starter)
   POST /api/playbooks/<name>             write playbook (repo-local override)
   POST /api/scenarios/<name>/file/<fn>   write scenario file
@@ -66,6 +68,7 @@ from ..config import (
     STARTER_SCENARIO_NAME,
     HarnessConfig,
     append_gitignore,
+    dump_canonical_yaml,
     write_default_config,
     write_starter_scenario,
 )
@@ -252,6 +255,10 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 self._api_implement(self._read_json_body()); return
             if p == "/api/config/raw":
                 self._api_config_raw_post(self._read_body().decode("utf-8")); return
+            if p == "/api/config/validate":
+                self._api_config_validate(self._read_body().decode("utf-8")); return
+            if p == "/api/config/form":
+                self._api_config_form(self._read_json_body()); return
             if p == "/api/init":
                 self._api_init(self._read_json_body()); return
             if p == "/api/bundle/preview":
@@ -328,6 +335,102 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             cd.mkdir(parents=True, exist_ok=True)
             (cd / CONFIG_FILE_NAME).write_text(text, encoding="utf-8")
             self._send_json(200, {"ok": True})
+
+        def _api_config_validate(self, text: str) -> None:
+            """Dry-run a config body. Never writes; reports issues + resolved.
+
+            Powers the live preview underneath the Build > Config form so a
+            typo lights up before the user hits Save. Always returns 200
+            with ``ok`` (true iff there are no ``error``-level issues).
+            """
+            import yaml
+            issues: list[dict[str, str]] = []
+            raw: Any = {}
+            try:
+                raw = yaml.safe_load(text) if text.strip() else {}
+            except yaml.YAMLError as e:
+                self._send_json(200, {
+                    "ok": False,
+                    "issues": [{"level": "error", "field": "_yaml",
+                                "message": f"invalid YAML: {e}"}],
+                    "form": None, "resolved": None,
+                })
+                return
+            if raw is None:
+                raw = {}
+            if not isinstance(raw, dict):
+                self._send_json(200, {
+                    "ok": False,
+                    "issues": [{"level": "error", "field": "_root",
+                                "message": "top-level must be a mapping"}],
+                    "form": None, "resolved": None,
+                })
+                return
+            cfg, more = HarnessConfig.from_dict_with_issues(raw)
+            issues.extend(more)
+            r = cfg.resolved(repo)
+            self._send_json(200, {
+                "ok": not any(i["level"] == "error" for i in issues),
+                "issues": issues,
+                "form": _config_to_form(cfg),
+                "resolved": {
+                    "runs_dir": str(r.runs_dir),
+                    "sandbox_dir": str(r.sandbox_dir),
+                    "clean_workspace_dir": str(r.clean_workspace_dir),
+                    "scenarios_dir": str(r.scenarios_dir),
+                    "default_provider": r.default_provider,
+                    "policy": {
+                        "max_code_iterations": r.policy.max_code_iterations,
+                        "max_validation_attempts_per_iteration":
+                            r.policy.max_validation_attempts_per_iteration,
+                        "max_diagnostic_rounds_per_failure":
+                            r.policy.max_diagnostic_rounds_per_failure,
+                        "max_total_wall_clock_minutes":
+                            r.policy.max_total_wall_clock_minutes,
+                    },
+                    "notes": cfg.notes,
+                },
+            })
+
+        def _api_config_form(self, body: Any) -> None:
+            """Convert a structured form dict to canonical YAML.
+
+            Body matches ``_config_to_form`` output (flat scalar fields).
+            Returns the YAML text and a fresh validation report so the
+            client can show both panes in one call.
+            """
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "body must be a JSON object"}); return
+            # Reconstruct a HarnessConfig-shaped dict from the form fields.
+            # Policy fields stay top-level (HarnessConfig.from_dict_with_issues
+            # accepts that and we want stable round-tripping).
+            form = dict(body)
+            cfg, issues = HarnessConfig.from_dict_with_issues(form)
+            yaml_text = dump_canonical_yaml(cfg)
+            r = cfg.resolved(repo)
+            self._send_json(200, {
+                "ok": not any(i["level"] == "error" for i in issues),
+                "yaml": yaml_text,
+                "issues": issues,
+                "form": _config_to_form(cfg),
+                "resolved": {
+                    "runs_dir": str(r.runs_dir),
+                    "sandbox_dir": str(r.sandbox_dir),
+                    "clean_workspace_dir": str(r.clean_workspace_dir),
+                    "scenarios_dir": str(r.scenarios_dir),
+                    "default_provider": r.default_provider,
+                    "policy": {
+                        "max_code_iterations": r.policy.max_code_iterations,
+                        "max_validation_attempts_per_iteration":
+                            r.policy.max_validation_attempts_per_iteration,
+                        "max_diagnostic_rounds_per_failure":
+                            r.policy.max_diagnostic_rounds_per_failure,
+                        "max_total_wall_clock_minutes":
+                            r.policy.max_total_wall_clock_minutes,
+                    },
+                    "notes": cfg.notes,
+                },
+            })
 
         # ----- onboarding --------------------------------------------
 
@@ -782,6 +885,24 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             self._send_json(202, {"job_id": job_id})
 
     return Handler
+
+
+def _config_to_form(cfg: HarnessConfig) -> dict[str, Any]:
+    """Flat dict the Build > Config form binds to. One key per input."""
+    return {
+        "runs_dir": cfg.runs_dir,
+        "default_provider": cfg.default_provider,
+        "scenarios_dir": cfg.scenarios_dir,
+        "sandbox_dir": cfg.sandbox_dir,
+        "clean_workspace_dir": cfg.clean_workspace_dir,
+        "notes": cfg.notes,
+        "max_code_iterations": cfg.max_code_iterations,
+        "max_validation_attempts_per_iteration":
+            cfg.max_validation_attempts_per_iteration,
+        "max_diagnostic_rounds_per_failure":
+            cfg.max_diagnostic_rounds_per_failure,
+        "max_total_wall_clock_minutes": cfg.max_total_wall_clock_minutes,
+    }
 
 
 def _valid_scenario_name(name: str) -> bool:
