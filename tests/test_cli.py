@@ -187,6 +187,182 @@ def test_bundle_import_missing_file(tmp_path: Path, capsys):
     assert "not found" in err.lower()
 
 
+def _fake_run(
+    runs_dir: Path,
+    task_id: str,
+    *,
+    final_status: str = "passed",
+    selected: int | None = 1,
+    iterations: int = 1,
+    goal: str = "fix gpu init timeout",
+    created: str = "2026-05-21T10:00:00Z",
+    updated: str = "2026-05-21T10:01:30Z",
+    e2e_status: str = "passed",
+) -> Path:
+    """Fabricate a minimal run directory the CLI readers can consume.
+
+    This avoids running the full orchestrator just to exercise the
+    ``runs ls`` / ``runs show`` output paths.
+    """
+    root = runs_dir / task_id
+    (root / "iterations").mkdir(parents=True)
+    (root / "task_manifest.json").write_text(json.dumps({
+        "task_id": task_id,
+        "status": "completed",
+        "final_status": final_status,
+        "selected_iteration": selected,
+        "created_at_utc": created,
+        "updated_at_utc": updated,
+        "task_contract": {"implementation_goal": goal},
+    }, indent=2))
+    for i in range(1, iterations + 1):
+        d = root / "iterations" / f"iter-{i:03d}"
+        (d / "validations" / "attempt-001").mkdir(parents=True)
+        (d / "manifest.json").write_text(json.dumps({
+            "task_id": task_id,
+            "iteration": i,
+            "code": {"patch_hash": f"hash{i:03d}abc", "changed_files": ["src/a.py"]},
+            "agent_output": {"summary": f"iter {i} did the thing"},
+            "attempts": [1],
+            "final_e2e_status": e2e_status,
+        }))
+    (root / "final_review_report.md").write_text("# report\n")
+    (root / "final_review_report.json").write_text("{}\n")
+    return root
+
+
+def test_runs_ls_lists_newest_first(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    runs_dir = tmp_path / ".dev-loop" / "runs"
+    _fake_run(runs_dir, "20260101-000000-old", goal="old run")
+    _fake_run(runs_dir, "20260520-120000-new", goal="new run")
+
+    rc = cli.main(["--repo", str(tmp_path), "runs", "ls"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "TASK_ID" in out and "STATUS" in out
+    # newest-first ordering
+    assert out.index("20260520-120000-new") < out.index("20260101-000000-old")
+    assert "passed" in out
+
+
+def test_runs_ls_empty_directory(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    rc = cli.main(["--repo", str(tmp_path), "runs", "ls"])
+    assert rc == 0
+    out = capsys.readouterr().out.lower()
+    assert "no runs" in out
+
+
+def test_runs_ls_status_filter_and_json(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    runs_dir = tmp_path / ".dev-loop" / "runs"
+    _fake_run(runs_dir, "20260101-000000-a", final_status="passed")
+    _fake_run(
+        runs_dir, "20260102-000000-b",
+        final_status="failed_inconclusive", selected=None,
+        e2e_status="failed",
+    )
+
+    rc = cli.main([
+        "--repo", str(tmp_path), "runs", "ls",
+        "--status", "passed", "--json",
+    ])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["runs"]) == 1
+    assert payload["runs"][0]["task_id"] == "20260101-000000-a"
+
+
+def test_runs_ls_tolerates_corrupt_manifest(tmp_path: Path, capsys):
+    """A broken run dir must not blow up the whole listing."""
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    runs_dir = tmp_path / ".dev-loop" / "runs"
+    _fake_run(runs_dir, "20260101-000000-good")
+    bad = runs_dir / "20260102-000000-bad"
+    bad.mkdir(parents=True)
+    (bad / "task_manifest.json").write_text("not valid json {")
+
+    rc = cli.main(["--repo", str(tmp_path), "runs", "ls"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "20260101-000000-good" in out
+    assert "20260102-000000-bad" not in out
+
+
+def test_runs_show_summarizes_one_run(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    runs_dir = tmp_path / ".dev-loop" / "runs"
+    _fake_run(runs_dir, "20260520-120000-x", iterations=2, selected=2)
+
+    rc = cli.main([
+        "--repo", str(tmp_path), "runs", "show", "20260520-120000-x",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "20260520-120000-x" in out
+    assert "passed" in out
+    assert "iter-001" in out and "iter-002" in out
+    # selected iteration is marked
+    assert "* iter-002" in out
+    assert "report (md)" in out
+
+
+def test_runs_show_last_alias(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    runs_dir = tmp_path / ".dev-loop" / "runs"
+    _fake_run(runs_dir, "20260101-000000-old")
+    _fake_run(runs_dir, "20260520-120000-new")
+
+    rc = cli.main(["--repo", str(tmp_path), "runs", "show", "last"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "20260520-120000-new" in out
+    assert "20260101-000000-old" not in out
+
+
+def test_runs_show_missing_run_clean_error(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    rc = cli.main(["--repo", str(tmp_path), "runs", "show", "does-not-exist"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "not found" in err.lower()
+    assert "runs ls" in err
+
+
+def test_runs_show_last_with_no_runs_errors_cleanly(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    rc = cli.main(["--repo", str(tmp_path), "runs", "show", "last"])
+    assert rc == 1
+    err = capsys.readouterr().err.lower()
+    assert "no runs" in err
+
+
+def test_runs_show_json_includes_iterations(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    runs_dir = tmp_path / ".dev-loop" / "runs"
+    _fake_run(runs_dir, "20260520-120000-x", iterations=2, selected=2)
+
+    rc = cli.main([
+        "--repo", str(tmp_path), "runs", "show", "20260520-120000-x", "--json",
+    ])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["task_id"] == "20260520-120000-x"
+    assert data["selected_iteration"] == 2
+    assert len(data["iterations"]) == 2
+    assert data["iterations"][0]["iteration"] == 1
+
+
 def test_schema_validate_ok(tmp_path: Path):
     obj = {
         "type": "task_contract",

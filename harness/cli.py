@@ -8,6 +8,8 @@ Subcommands:
   dev-loop config validate                # lint .dev-loop/config.yaml
   dev-loop schema validate <file> <schema>
   dev-loop replay <scenario>              # one-liner replay
+  dev-loop runs ls                        # list runs in the ledger
+  dev-loop runs show <task-id>            # summarize one run
   dev-loop bundle export [--out FILE]     # pack config+scenarios+playbooks
   dev-loop bundle import FILE [--apply]   # preview / apply a bundle
 """
@@ -40,6 +42,7 @@ from .config import (
     write_starter_scenario,
 )
 from .orchestrator import Orchestrator, OrchestratorConfig
+from .runs import list_runs, show_run
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -90,6 +93,36 @@ def main(argv: list[str] | None = None) -> int:
     p_replay.add_argument("scenario", help="scenario directory or name")
     p_replay.add_argument("--request", default=None,
                           help="overrides the scenario's task_request.md")
+
+    p_runs = sub.add_parser(
+        "runs", help="inspect the run ledger (list / show past runs)",
+    )
+    runs_sub = p_runs.add_subparsers(dest="runs_cmd", required=True)
+    p_runs_ls = runs_sub.add_parser("ls", help="list runs newest-first")
+    p_runs_ls.add_argument(
+        "--limit", type=int, default=20,
+        help="show at most this many runs (default: 20; use 0 for all)",
+    )
+    p_runs_ls.add_argument(
+        "--status",
+        help="filter by final_status (e.g. passed, failed_inconclusive)",
+    )
+    p_runs_ls.add_argument(
+        "--json", action="store_true",
+        help="emit JSON instead of a human-readable table",
+    )
+    p_runs_show = runs_sub.add_parser(
+        "show", help="print a detailed summary of one run",
+    )
+    p_runs_show.add_argument(
+        "task_id",
+        help="task id (directory name under runs_dir) or 'last' for the "
+             "most recent run",
+    )
+    p_runs_show.add_argument(
+        "--json", action="store_true",
+        help="emit JSON instead of a human-readable summary",
+    )
 
     p_ui = sub.add_parser("ui", help="launch the local web UI")
     p_ui.add_argument("--host", default="127.0.0.1")
@@ -159,6 +192,17 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = HarnessConfig.load(repo_root=repo, explicit_path=args.config)
     resolved = cfg.resolved(repo)
+
+    if args.cmd == "runs":
+        if args.runs_cmd == "ls":
+            return _cmd_runs_ls(
+                resolved.runs_dir,
+                limit=args.limit, status=args.status, as_json=args.json,
+            )
+        if args.runs_cmd == "show":
+            return _cmd_runs_show(
+                resolved.runs_dir, task_id=args.task_id, as_json=args.json,
+            )
 
     if args.cmd == "implement":
         return _cmd_implement(
@@ -319,6 +363,122 @@ def _cmd_config_validate(
     if strict and warnings:
         return 1
     return 0
+
+
+def _cmd_runs_ls(
+    runs_dir: Path, *, limit: int, status: str | None, as_json: bool,
+) -> int:
+    runs = list_runs(runs_dir)
+    if status:
+        runs = [r for r in runs if r.get("final_status") == status]
+    if limit and limit > 0:
+        runs = runs[:limit]
+
+    if as_json:
+        print(json.dumps({"runs_dir": str(runs_dir), "runs": runs}, indent=2))
+        return 0
+
+    if not runs:
+        if not runs_dir.exists():
+            print(f"no runs yet — runs_dir does not exist: {runs_dir}")
+        elif status:
+            print(f"no runs with final_status={status!r} in {runs_dir}")
+        else:
+            print(f"no runs found in {runs_dir}")
+        return 0
+
+    headers = ("TASK_ID", "STATUS", "ITERS", "SEL", "DURATION", "GOAL")
+    rows = [headers]
+    for r in runs:
+        rows.append((
+            r["task_id"],
+            r.get("final_status") or r.get("status") or "-",
+            str(r.get("iterations") or 0),
+            str(r.get("selected_iteration") if r.get("selected_iteration") is not None else "-"),
+            _fmt_duration(r.get("duration_seconds")),
+            _truncate(r.get("goal") or "", 60),
+        ))
+    widths = [max(len(row[i]) for row in rows) for i in range(len(headers))]
+    for row in rows:
+        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip())
+    return 0
+
+
+def _cmd_runs_show(
+    runs_dir: Path, *, task_id: str, as_json: bool,
+) -> int:
+    resolved_id = task_id
+    if task_id == "last":
+        runs = list_runs(runs_dir)
+        if not runs:
+            print(f"error: no runs in {runs_dir}", file=sys.stderr)
+            return 1
+        resolved_id = runs[0]["task_id"]
+
+    detail = show_run(runs_dir, resolved_id)
+    if detail is None:
+        print(f"error: run not found: {resolved_id}", file=sys.stderr)
+        print(f"  looked under: {runs_dir / resolved_id}", file=sys.stderr)
+        print("  try `dev-loop runs ls` to see available runs.", file=sys.stderr)
+        return 1
+
+    if as_json:
+        print(json.dumps(detail, indent=2))
+        return 0
+
+    print(f"task_id:       {detail['task_id']}")
+    print(f"final_status:  {detail.get('final_status') or '-'}")
+    print(f"status:        {detail.get('status') or '-'}")
+    if detail.get("stop_reason"):
+        print(f"stop_reason:   {detail['stop_reason']}")
+    sel = detail.get("selected_iteration")
+    print(f"selected_iter: {sel if sel is not None else '-'}")
+    print(f"duration:      {_fmt_duration(detail.get('duration_seconds'))}")
+    print(f"created:       {detail.get('created_at_utc') or '-'}")
+    print(f"updated:       {detail.get('updated_at_utc') or '-'}")
+    if detail.get("goal"):
+        print(f"goal:          {detail['goal']}")
+    print(f"path:          {detail['path']}")
+    if detail.get("report_md"):
+        print(f"report (md):   {detail['report_md']}")
+    if detail.get("report_json"):
+        print(f"report (json): {detail['report_json']}")
+
+    iterations = detail.get("iterations") or []
+    if iterations:
+        print(f"\niterations ({len(iterations)}):")
+        for it in iterations:
+            mark = "*" if sel is not None and it["iteration"] == sel else " "
+            e2e = it.get("final_e2e_status") or "-"
+            attempts = it.get("attempts") or 0
+            phash = (it.get("patch_hash") or "")[:10] or "-"
+            n_files = len(it.get("changed_files") or [])
+            print(
+                f"  {mark} iter-{it['iteration']:03d}  e2e={e2e:<7} "
+                f"attempts={attempts}  patch={phash}  files={n_files}"
+            )
+            if it.get("error"):
+                print(f"      error: {_truncate(it['error'], 100)}")
+            if it.get("summary"):
+                print(f"      {_truncate(it['summary'], 100)}")
+    return 0
+
+
+def _fmt_duration(seconds: int | None) -> str:
+    if seconds is None:
+        return "-"
+    if seconds < 60:
+        return f"{seconds}s"
+    m, s = divmod(seconds, 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
+
+
+def _truncate(s: str, n: int) -> str:
+    s = s.strip().replace("\n", " ")
+    return s if len(s) <= n else s[: max(0, n - 1)] + "…"
 
 
 def _cmd_schema_validate(file: Path, schema_name: str) -> int:

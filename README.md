@@ -88,6 +88,24 @@ unknown providers before they reach the loop).
   final_review_report.md
 ```
 
+## Inspecting past runs
+
+The same run ledger that powers the web UI's Analyze tab is queryable
+from the CLI:
+
+```bash
+dev-loop runs ls                   # newest-first table of recent runs
+dev-loop runs ls --status passed   # filter by final_status
+dev-loop runs ls --json            # machine-readable output
+dev-loop runs show <task-id>       # iterations, attempts, report paths
+dev-loop runs show last            # same, for the most recent run
+```
+
+`runs show` prints the iteration timeline (e2e status, attempt count,
+patch hash, file count, agent summary) and the paths to the structured
+and markdown final reports so you can pipe straight into `less` or open
+in an editor without digging through `.dev-loop/runs/`.
+
 ## Provider model
 
 V1 supports three providers:
