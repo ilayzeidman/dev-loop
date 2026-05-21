@@ -13,6 +13,7 @@ showing the others.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -153,8 +154,98 @@ def show_run(runs_dir: Path, task_id: str) -> dict[str, Any] | None:
         "updated_at_utc": tm.get("updated_at_utc"),
         "duration_seconds": run_duration_seconds(tm),
         "goal": tc.get("implementation_goal"),
+        "scenario": tc.get("scenario") or tm.get("scenario"),
         "iterations": iterations,
         "path": str(run_root),
         "report_md": str(report_md) if report_md.exists() else None,
         "report_json": str(report_json) if report_json.exists() else None,
+    }
+
+
+def audit_rollup(run_root: Path) -> dict[str, Any]:
+    """Aggregate ``capability_audit.jsonl`` into counts.
+
+    Mirrors the rollup the UI compare view shows so headless and web
+    surfaces agree on totals. Malformed lines are skipped.
+    """
+    path = run_root / "capability_audit.jsonl"
+    by_status: dict[str, int] = {}
+    by_capability: dict[str, int] = {}
+    total = 0
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except Exception:
+                continue
+            total += 1
+            status = entry.get("status") or "?"
+            by_status[status] = by_status.get(status, 0) + 1
+            cap = entry.get("capability") or "?"
+            by_capability[cap] = by_capability.get(cap, 0) + 1
+    return {"total": total, "by_status": by_status, "by_capability": by_capability}
+
+
+def diff_runs(runs_dir: Path, a: str, b: str) -> dict[str, Any]:
+    """Compute the headless analog of the UI's run-compare view.
+
+    Returns ``{"a": summary_or_None, "b": summary_or_None, "deltas": {...}}``
+    where each side summary is the ``show_run`` shape plus an ``audit``
+    rollup. When either run is missing, that side is ``None`` and
+    ``deltas['both_present']`` is ``False`` — callers decide whether to
+    error or render a partial diff. Pure so tests don't depend on stdout.
+    """
+    a_summary = show_run(runs_dir, a)
+    b_summary = show_run(runs_dir, b)
+    if a_summary is not None:
+        a_summary = {**a_summary, "audit": audit_rollup(Path(a_summary["path"]))}
+    if b_summary is not None:
+        b_summary = {**b_summary, "audit": audit_rollup(Path(b_summary["path"]))}
+    return {"a": a_summary, "b": b_summary,
+            "deltas": _diff_deltas(a_summary, b_summary)}
+
+
+def _diff_deltas(a: dict[str, Any] | None,
+                 b: dict[str, Any] | None) -> dict[str, Any]:
+    if a is None or b is None:
+        return {"both_present": False}
+    iters_a = a.get("iterations") or []
+    iters_b = b.get("iterations") or []
+    da_s = a.get("duration_seconds")
+    db_s = b.get("duration_seconds")
+    dur_delta = (
+        (db_s or 0) - (da_s or 0)
+        if (da_s is not None and db_s is not None) else None
+    )
+    n = min(len(iters_a), len(iters_b))
+    same_status = sum(
+        1 for i in range(n)
+        if iters_a[i].get("final_e2e_status") == iters_b[i].get("final_e2e_status")
+    )
+    first_diverge: int | None = None
+    for i in range(n):
+        if (iters_a[i].get("final_e2e_status") != iters_b[i].get("final_e2e_status")
+                or iters_a[i].get("patch_hash") != iters_b[i].get("patch_hash")):
+            first_diverge = i + 1
+            break
+    files_a = {f for it in iters_a for f in (it.get("changed_files") or [])}
+    files_b = {f for it in iters_b for f in (it.get("changed_files") or [])}
+    audit_a = (a.get("audit") or {}).get("total") or 0
+    audit_b = (b.get("audit") or {}).get("total") or 0
+    return {
+        "both_present": True,
+        "same_goal": (a.get("goal") or "") == (b.get("goal") or ""),
+        "same_scenario": (a.get("scenario") or "") == (b.get("scenario") or ""),
+        "same_final_status": a.get("final_status") == b.get("final_status"),
+        "iteration_count_delta": len(iters_b) - len(iters_a),
+        "duration_seconds_delta": dur_delta,
+        "iteration_status_agreement": same_status,
+        "iteration_status_compared": n,
+        "first_diverging_iteration": first_diverge,
+        "files_only_a": sorted(files_a - files_b),
+        "files_only_b": sorted(files_b - files_a),
+        "files_both": sorted(files_a & files_b),
+        "audit_total_delta": audit_b - audit_a,
     }

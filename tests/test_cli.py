@@ -363,6 +363,101 @@ def test_runs_show_json_includes_iterations(tmp_path: Path, capsys):
     assert data["iterations"][0]["iteration"] == 1
 
 
+def test_runs_diff_text_summary(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    runs_dir = tmp_path / ".dev-loop" / "runs"
+    _fake_run(
+        runs_dir, "20260101-000000-a",
+        iterations=1, selected=1, final_status="passed", e2e_status="passed",
+        updated="2026-05-21T10:01:00Z",
+    )
+    _fake_run(
+        runs_dir, "20260520-120000-b",
+        iterations=2, selected=2, final_status="failed_inconclusive",
+        e2e_status="failed",
+        updated="2026-05-21T10:03:30Z",
+    )
+
+    rc = cli.main([
+        "--repo", str(tmp_path), "runs", "diff",
+        "20260101-000000-a", "20260520-120000-b",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "A  20260101-000000-a" in out
+    assert "B  20260520-120000-b" in out
+    assert "iteration_count_delta:      +1" in out
+    assert "same_final_status:          no" in out
+    assert "first_diverging_iteration:  1" in out
+
+
+def test_runs_diff_json_payload(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    runs_dir = tmp_path / ".dev-loop" / "runs"
+    _fake_run(runs_dir, "20260101-000000-a", iterations=1)
+    _fake_run(runs_dir, "20260520-120000-b", iterations=2)
+
+    rc = cli.main([
+        "--repo", str(tmp_path), "runs", "diff",
+        "20260101-000000-a", "20260520-120000-b", "--json",
+    ])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["a"]["task_id"] == "20260101-000000-a"
+    assert payload["b"]["task_id"] == "20260520-120000-b"
+    assert payload["deltas"]["both_present"] is True
+    assert payload["deltas"]["iteration_count_delta"] == 1
+    assert payload["a"]["audit"] == {
+        "total": 0, "by_status": {}, "by_capability": {},
+    }
+
+
+def test_runs_diff_resolves_last_aliases(tmp_path: Path, capsys):
+    """``last`` and ``last-N`` map to newest/N-th newest by sort order."""
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    runs_dir = tmp_path / ".dev-loop" / "runs"
+    _fake_run(runs_dir, "20260101-000000-old", iterations=1)
+    _fake_run(runs_dir, "20260520-120000-new", iterations=3)
+
+    rc = cli.main([
+        "--repo", str(tmp_path), "runs", "diff", "last-1", "last", "--json",
+    ])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["a"]["task_id"] == "20260101-000000-old"
+    assert payload["b"]["task_id"] == "20260520-120000-new"
+    assert payload["deltas"]["iteration_count_delta"] == 2
+
+
+def test_runs_diff_missing_run_clean_error(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    runs_dir = tmp_path / ".dev-loop" / "runs"
+    _fake_run(runs_dir, "20260101-000000-a")
+
+    rc = cli.main([
+        "--repo", str(tmp_path), "runs", "diff",
+        "20260101-000000-a", "does-not-exist",
+    ])
+    assert rc == 1
+    err = capsys.readouterr().err.lower()
+    assert "not found" in err
+
+
+def test_runs_diff_last_alias_with_no_runs_errors(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    rc = cli.main([
+        "--repo", str(tmp_path), "runs", "diff", "last-1", "last",
+    ])
+    assert rc == 1
+    err = capsys.readouterr().err.lower()
+    assert "cannot resolve" in err
+
+
 def test_schema_validate_ok(tmp_path: Path):
     obj = {
         "type": "task_contract",

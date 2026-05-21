@@ -99,12 +99,22 @@ dev-loop runs ls --status passed   # filter by final_status
 dev-loop runs ls --json            # machine-readable output
 dev-loop runs show <task-id>       # iterations, attempts, report paths
 dev-loop runs show last            # same, for the most recent run
+dev-loop runs diff <a> <b>         # CLI mirror of the Analyze tab compare
+dev-loop runs diff last-1 last     # compare the previous run to the newest
 ```
 
 `runs show` prints the iteration timeline (e2e status, attempt count,
 patch hash, file count, agent summary) and the paths to the structured
 and markdown final reports so you can pipe straight into `less` or open
 in an editor without digging through `.dev-loop/runs/`.
+
+`runs diff` is the headless analog of the Analyze tab's compare view:
+side-by-side header (final status, iterations, duration, audit total,
+goal), a deltas block (iteration-count delta, first diverging iteration,
+status agreement, audit delta) and a files-only-in-A / only-in-B / both
+listing. `last` and `last-N` resolve to the newest / N-th newest run, so
+`dev-loop runs diff last-1 last --json` is the canonical "did the most
+recent change help or hurt?" query.
 
 ## Provider model
 

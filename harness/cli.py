@@ -10,6 +10,7 @@ Subcommands:
   dev-loop replay <scenario>              # one-liner replay
   dev-loop runs ls                        # list runs in the ledger
   dev-loop runs show <task-id>            # summarize one run
+  dev-loop runs diff <a> <b>              # compare two runs (CLI mirror of UI)
   dev-loop bundle export [--out FILE]     # pack config+scenarios+playbooks
   dev-loop bundle import FILE [--apply]   # preview / apply a bundle
 """
@@ -20,6 +21,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from . import schemas
 from .agents import create_runner
@@ -42,7 +44,7 @@ from .config import (
     write_starter_scenario,
 )
 from .orchestrator import Orchestrator, OrchestratorConfig
-from .runs import list_runs, show_run
+from .runs import diff_runs, list_runs, show_run
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -124,6 +126,24 @@ def main(argv: list[str] | None = None) -> int:
         help="emit JSON instead of a human-readable summary",
     )
 
+    p_runs_diff = runs_sub.add_parser(
+        "diff",
+        help="compare two runs (CLI mirror of the Analyze tab's compare view)",
+    )
+    p_runs_diff.add_argument(
+        "a",
+        help="baseline task id; 'last' = newest, 'last-N' = N-th newest "
+             "(so 'diff last-1 last' compares the previous run to the newest)",
+    )
+    p_runs_diff.add_argument(
+        "b",
+        help="comparison task id; same 'last' / 'last-N' aliases as <a>",
+    )
+    p_runs_diff.add_argument(
+        "--json", action="store_true",
+        help="emit JSON instead of a human-readable diff",
+    )
+
     p_ui = sub.add_parser("ui", help="launch the local web UI")
     p_ui.add_argument("--host", default="127.0.0.1")
     p_ui.add_argument("--port", type=int, default=8765)
@@ -202,6 +222,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.runs_cmd == "show":
             return _cmd_runs_show(
                 resolved.runs_dir, task_id=args.task_id, as_json=args.json,
+            )
+        if args.runs_cmd == "diff":
+            return _cmd_runs_diff(
+                resolved.runs_dir, a=args.a, b=args.b, as_json=args.json,
             )
 
     if args.cmd == "implement":
@@ -404,16 +428,37 @@ def _cmd_runs_ls(
     return 0
 
 
+def _resolve_run_alias(runs_dir: Path, ref: str) -> str | None:
+    """Resolve ``last`` / ``last-N`` to a concrete task id.
+
+    Non-alias strings are returned unchanged so callers can pass any
+    user-supplied id through this filter. Returns ``None`` when an
+    alias has no match (e.g. ``last`` with an empty ledger, or
+    ``last-99`` when only 3 runs exist).
+    """
+    if ref != "last" and not ref.startswith("last-"):
+        return ref
+    runs = list_runs(runs_dir)
+    if not runs:
+        return None
+    if ref == "last":
+        return runs[0]["task_id"]
+    try:
+        offset = int(ref.split("-", 1)[1])
+    except (IndexError, ValueError):
+        return ref
+    if offset < 0 or offset >= len(runs):
+        return None
+    return runs[offset]["task_id"]
+
+
 def _cmd_runs_show(
     runs_dir: Path, *, task_id: str, as_json: bool,
 ) -> int:
-    resolved_id = task_id
-    if task_id == "last":
-        runs = list_runs(runs_dir)
-        if not runs:
-            print(f"error: no runs in {runs_dir}", file=sys.stderr)
-            return 1
-        resolved_id = runs[0]["task_id"]
+    resolved_id = _resolve_run_alias(runs_dir, task_id)
+    if resolved_id is None:
+        print(f"error: no runs in {runs_dir}", file=sys.stderr)
+        return 1
 
     detail = show_run(runs_dir, resolved_id)
     if detail is None:
@@ -462,6 +507,117 @@ def _cmd_runs_show(
             if it.get("summary"):
                 print(f"      {_truncate(it['summary'], 100)}")
     return 0
+
+
+def _cmd_runs_diff(
+    runs_dir: Path, *, a: str, b: str, as_json: bool,
+) -> int:
+    a_id = _resolve_run_alias(runs_dir, a)
+    b_id = _resolve_run_alias(runs_dir, b)
+    if a_id is None or b_id is None:
+        unresolved = ", ".join(
+            ref for ref, rid in [(a, a_id), (b, b_id)] if rid is None
+        )
+        print(
+            f"error: cannot resolve run reference: {unresolved}",
+            file=sys.stderr,
+        )
+        print("  try `dev-loop runs ls` to see available runs.", file=sys.stderr)
+        return 1
+
+    diff = diff_runs(runs_dir, a_id, b_id)
+
+    if as_json:
+        print(json.dumps(diff, indent=2))
+        return 0 if diff["deltas"].get("both_present") else 1
+
+    sa, sb, deltas = diff["a"], diff["b"], diff["deltas"]
+    if sa is None or sb is None:
+        if sa is None:
+            print(f"error: run not found: {a_id}", file=sys.stderr)
+        if sb is None:
+            print(f"error: run not found: {b_id}", file=sys.stderr)
+        return 1
+
+    print(f"A  {sa['task_id']}")
+    print(f"B  {sb['task_id']}")
+    print()
+    rows = [
+        ("field", "A", "B"),
+        ("final_status",
+         sa.get("final_status") or "-", sb.get("final_status") or "-"),
+        ("selected_iter",
+         _fmt_optional(sa.get("selected_iteration")),
+         _fmt_optional(sb.get("selected_iteration"))),
+        ("iterations",
+         str(len(sa.get("iterations") or [])),
+         str(len(sb.get("iterations") or []))),
+        ("duration",
+         _fmt_duration(sa.get("duration_seconds")),
+         _fmt_duration(sb.get("duration_seconds"))),
+        ("audit_total",
+         str((sa.get("audit") or {}).get("total") or 0),
+         str((sb.get("audit") or {}).get("total") or 0)),
+        ("goal",
+         _truncate(sa.get("goal") or "-", 50),
+         _truncate(sb.get("goal") or "-", 50)),
+    ]
+    widths = [max(len(row[i]) for row in rows) for i in range(3)]
+    for row in rows:
+        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip())
+
+    print()
+    print("deltas:")
+    print(f"  same_goal:                  {_fmt_bool(deltas.get('same_goal'))}")
+    print(f"  same_scenario:              {_fmt_bool(deltas.get('same_scenario'))}")
+    print(f"  same_final_status:          {_fmt_bool(deltas.get('same_final_status'))}")
+    print(f"  iteration_count_delta:      "
+          f"{_fmt_signed(deltas.get('iteration_count_delta'))}")
+    print(f"  duration_seconds_delta:     "
+          f"{_fmt_signed(deltas.get('duration_seconds_delta'))}")
+    n = deltas.get("iteration_status_compared") or 0
+    agree = deltas.get("iteration_status_agreement") or 0
+    print(f"  iteration_status_agreement: {agree}/{n}")
+    fd = deltas.get("first_diverging_iteration")
+    print(f"  first_diverging_iteration:  {fd if fd is not None else '-'}")
+    print(f"  audit_total_delta:          "
+          f"{_fmt_signed(deltas.get('audit_total_delta'))}")
+
+    only_a = deltas.get("files_only_a") or []
+    only_b = deltas.get("files_only_b") or []
+    both = deltas.get("files_both") or []
+    print()
+    print(f"files only in A ({len(only_a)}):")
+    for f in only_a:
+        print(f"  - {f}")
+    print(f"files only in B ({len(only_b)}):")
+    for f in only_b:
+        print(f"  + {f}")
+    print(f"files in both   ({len(both)}):")
+    for f in both:
+        print(f"  = {f}")
+
+    return 0
+
+
+def _fmt_optional(v: Any) -> str:
+    return "-" if v is None else str(v)
+
+
+def _fmt_bool(v: Any) -> str:
+    if v is True:
+        return "yes"
+    if v is False:
+        return "no"
+    return "-"
+
+
+def _fmt_signed(v: int | None) -> str:
+    if v is None:
+        return "-"
+    if v > 0:
+        return f"+{v}"
+    return str(v)
 
 
 def _fmt_duration(seconds: int | None) -> str:
