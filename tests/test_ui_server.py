@@ -927,6 +927,249 @@ def test_palette_caps_runs_to_avoid_huge_payload(tmp_path: Path):
         assert len(runs_items) <= 60
 
 
+# ----- /api/runs/<a>/compare/<b> (cross-run diff) -------------------------
+
+
+def _write_run(
+    tmp_path: Path,
+    task_id: str,
+    *,
+    final_status: str = "passed",
+    goal: str = "do x",
+    iterations: list[dict] | None = None,
+    audit_entries: list[dict] | None = None,
+    selected: int | None = None,
+    stop_reason: str | None = None,
+    created: str = "2026-05-21T12:00:00Z",
+    updated: str = "2026-05-21T12:01:00Z",
+) -> Path:
+    """Build a minimal but realistic run on disk for compare-endpoint tests."""
+    run_dir = tmp_path / ".dev-loop" / "runs" / task_id
+    run_dir.mkdir(parents=True)
+    manifest = {
+        "task_id": task_id,
+        "status": "completed",
+        "final_status": final_status,
+        "created_at_utc": created,
+        "updated_at_utc": updated,
+        "task_contract": {"implementation_goal": goal},
+    }
+    if selected is not None:
+        manifest["selected_iteration"] = selected
+    if stop_reason is not None:
+        manifest["stop_reason"] = stop_reason
+    (run_dir / "task_manifest.json").write_text(json.dumps(manifest))
+    iters_root = run_dir / "iterations"
+    iters_root.mkdir()
+    for it in iterations or []:
+        n = it["i"]
+        d = iters_root / f"iter-{n:03d}"
+        d.mkdir()
+        (d / "manifest.json").write_text(json.dumps({
+            "iteration": n,
+            "final_e2e_status": it.get("final_e2e_status"),
+            "agent_output": {"summary": it.get("summary", "")},
+            "code": {
+                "patch_hash": it.get("patch_hash"),
+                "changed_files": it.get("changed_files", []),
+            },
+        }))
+        v = d / "validations"
+        v.mkdir()
+        for k in range(it.get("attempts", 0)):
+            (v / f"attempt-{k + 1:03d}").mkdir()
+    if audit_entries:
+        (run_dir / "capability_audit.jsonl").write_text(
+            "\n".join(json.dumps(e) for e in audit_entries) + "\n",
+        )
+    return run_dir
+
+
+def test_compare_endpoint_two_passing_runs(tmp_path: Path):
+    """Two healthy runs of the same scenario — same goal, same verdict,
+    iteration count delta is zero."""
+    _write_run(tmp_path, "run-a", iterations=[
+        {"i": 1, "final_e2e_status": "passed", "summary": "fix",
+         "patch_hash": "aaaa", "changed_files": ["src/x.py"], "attempts": 1},
+    ])
+    _write_run(tmp_path, "run-b", iterations=[
+        {"i": 1, "final_e2e_status": "passed", "summary": "fix",
+         "patch_hash": "aaaa", "changed_files": ["src/x.py"], "attempts": 1},
+    ])
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/runs/run-a/compare/run-b")
+        assert status == 200
+        data = json.loads(body)
+        assert data["a"]["task_id"] == "run-a"
+        assert data["b"]["task_id"] == "run-b"
+        d = data["deltas"]
+        assert d["both_present"] is True
+        assert d["same_goal"] is True
+        assert d["same_final_status"] is True
+        assert d["iteration_count_delta"] == 0
+        assert d["first_diverging_iteration"] is None
+        assert d["files_only_a"] == []
+        assert d["files_only_b"] == []
+        assert d["files_both"] == ["src/x.py"]
+
+
+def test_compare_endpoint_shows_iteration_divergence(tmp_path: Path):
+    """When the runs differ on a specific iteration, the endpoint pins
+    where they diverge so the UI can land the user on that row."""
+    _write_run(tmp_path, "run-a", final_status="passed", iterations=[
+        {"i": 1, "final_e2e_status": "failed", "patch_hash": "a1",
+         "changed_files": ["a.py"]},
+        {"i": 2, "final_e2e_status": "passed", "patch_hash": "a2",
+         "changed_files": ["b.py"]},
+    ])
+    _write_run(tmp_path, "run-b", final_status="failed_e2e", iterations=[
+        {"i": 1, "final_e2e_status": "failed", "patch_hash": "a1",
+         "changed_files": ["a.py"]},
+        {"i": 2, "final_e2e_status": "failed", "patch_hash": "b2",
+         "changed_files": ["c.py"]},
+    ])
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/runs/run-a/compare/run-b")
+        assert status == 200
+        d = json.loads(body)["deltas"]
+        assert d["first_diverging_iteration"] == 2
+        assert d["same_final_status"] is False
+        # Iter 1 matches on both fields.
+        assert d["iteration_status_agreement"] >= 1
+        assert sorted(d["files_only_a"]) == ["b.py"]
+        assert sorted(d["files_only_b"]) == ["c.py"]
+        assert d["files_both"] == ["a.py"]
+
+
+def test_compare_endpoint_handles_missing_run(tmp_path: Path):
+    """A stale share link with one missing run still returns a 200 so
+    the user sees which side broke. 404 only when both are gone."""
+    _write_run(tmp_path, "run-a", iterations=[
+        {"i": 1, "final_e2e_status": "passed", "patch_hash": "x"},
+    ])
+    with _server(tmp_path) as (port, _):
+        # One missing -> 200 with that side null.
+        status, body = _get(port, "/api/runs/run-a/compare/does-not-exist")
+        assert status == 200
+        data = json.loads(body)
+        assert data["a"] is not None
+        assert data["b"] is None
+        assert data["deltas"]["both_present"] is False
+        # Both missing -> 404.
+        import urllib.error
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/runs/nope/compare/also-nope")
+        try:
+            urllib.request.urlopen(req, timeout=2)
+            raise AssertionError("expected HTTPError")
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
+
+
+def test_compare_endpoint_rolls_up_audit_counts(tmp_path: Path):
+    """Audit JSONL is summarised server-side so the UI can render the
+    side-by-side counts without parsing JSONL in the browser."""
+    _write_run(tmp_path, "run-a", audit_entries=[
+        {"capability": "trigger_dev_jenkins_build", "status": "ok"},
+        {"capability": "trigger_dev_jenkins_build", "status": "ok"},
+        {"capability": "fetch_logs", "status": "ok"},
+    ])
+    _write_run(tmp_path, "run-b", audit_entries=[
+        {"capability": "trigger_dev_jenkins_build", "status": "ok"},
+        {"capability": "trigger_dev_jenkins_build",
+         "status": "error", "error": "boom"},
+    ])
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/runs/run-a/compare/run-b")
+        assert status == 200
+        data = json.loads(body)
+        assert data["a"]["audit"]["total"] == 3
+        assert data["b"]["audit"]["total"] == 2
+        assert data["a"]["audit"]["by_capability"][
+            "trigger_dev_jenkins_build"] == 2
+        assert data["b"]["audit"]["by_status"]["error"] == 1
+        assert data["deltas"]["audit_total_delta"] == -1
+
+
+def test_compare_endpoint_survives_corrupt_iteration_manifest(tmp_path: Path):
+    """A garbage iteration manifest must not break the whole compare."""
+    run = _write_run(tmp_path, "run-a", iterations=[
+        {"i": 1, "final_e2e_status": "passed", "patch_hash": "x"},
+    ])
+    (run / "iterations" / "iter-002").mkdir()
+    (run / "iterations" / "iter-002" / "manifest.json").write_text("{not json")
+    _write_run(tmp_path, "run-b", iterations=[
+        {"i": 1, "final_e2e_status": "passed", "patch_hash": "x"},
+    ])
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/runs/run-a/compare/run-b")
+        assert status == 200
+        data = json.loads(body)
+        # Both iter dirs are accounted for; the corrupt one shows null
+        # fields rather than dropping the row.
+        assert data["a"]["iteration_count"] == 2
+        statuses = [it["final_e2e_status"] for it in data["a"]["iterations"]]
+        assert statuses[0] == "passed"
+        assert statuses[1] is None
+
+
+def test_compare_deltas_helper_pure():
+    """``_compare_deltas`` is pure over the summary shape; test it in
+    isolation so the UI layer can call it confidently from anywhere."""
+    from harness.ui.server import _compare_deltas
+    a = {
+        "task_id": "a", "final_status": "passed", "goal": "g",
+        "scenario": None, "duration_seconds": 60, "iteration_count": 2,
+        "iterations": [
+            {"i": 1, "final_e2e_status": "failed", "patch_hash": "p1",
+             "changed_files": ["a.py"]},
+            {"i": 2, "final_e2e_status": "passed", "patch_hash": "p2",
+             "changed_files": ["b.py"]},
+        ],
+        "audit": {"total": 4, "by_status": {}, "by_capability": {}},
+    }
+    b = {
+        "task_id": "b", "final_status": "passed", "goal": "g",
+        "scenario": None, "duration_seconds": 30, "iteration_count": 1,
+        "iterations": [
+            {"i": 1, "final_e2e_status": "passed", "patch_hash": "pp",
+             "changed_files": ["a.py", "c.py"]},
+        ],
+        "audit": {"total": 1, "by_status": {}, "by_capability": {}},
+    }
+    d = _compare_deltas(a, b)
+    assert d["both_present"] is True
+    assert d["same_final_status"] is True
+    assert d["iteration_count_delta"] == -1   # b had one fewer
+    assert d["duration_seconds_delta"] == -30  # b was 30s faster
+    assert d["first_diverging_iteration"] == 1  # they differ at iter 1
+    assert d["files_only_a"] == ["b.py"]
+    assert d["files_only_b"] == ["c.py"]
+    assert d["files_both"] == ["a.py"]
+    assert d["audit_total_delta"] == -3
+    # Either side missing → both_present False.
+    assert _compare_deltas(None, b)["both_present"] is False
+    assert _compare_deltas(a, None)["both_present"] is False
+
+
+def test_palette_exposes_compare_action(tmp_path: Path):
+    """Cmd+K -> "compare two runs" must be reachable so users discover
+    the cross-run diff without hunting through the sidebar."""
+    with _server(tmp_path) as (port, _):
+        items = json.loads(_get(port, "/api/palette")[1])["items"]
+        action_ids = {it["id"] for it in items if it["kind"] == "action"}
+        assert "compare.runs" in action_ids
+
+
+def test_compare_view_listed_in_index_doc(tmp_path: Path):
+    """index.html ships the compare panel + the run-list compare toggle
+    so the feature is reachable from the static document."""
+    with _server(tmp_path) as (port, _):
+        _, body = _get(port, "/")
+        assert 'id="analyze-compare"' in body
+        assert 'id="compare-mode-toggle"' in body
+
+
 def test_palette_listed_in_index_doc(tmp_path: Path):
     """Sanity: index.html includes the palette trigger so the user can
     find the keyboard shortcut even before discovering Cmd+K."""

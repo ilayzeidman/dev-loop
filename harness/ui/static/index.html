@@ -677,6 +677,16 @@
         <h3>Past runs</h3>
         <input id="run-filter" type="search"
           placeholder="filter by id, goal, or status…">
+        <div class="compare-toggle-row">
+          <label class="compare-toggle">
+            <input type="checkbox" id="compare-mode-toggle"
+              aria-label="Enable compare mode">
+            <span>Compare mode</span>
+          </label>
+          <span id="compare-pick-hint" class="muted compare-pick-hint hidden">
+            pick a 2nd run…
+          </span>
+        </div>
         <div id="run-tally" class="run-tally muted"></div>
         <ul id="run-list" class="run-list"></ul>
       </aside>
@@ -687,6 +697,12 @@
             Pick a run on the left to see its hero summary, iterations,
             patches, and capability audit. Every view has a copyable link
             you can share with a teammate.
+          </p>
+          <p class="muted">
+            Tweaked your config and re-ran the same scenario? Flip
+            <strong>Compare mode</strong> on the left, pick two runs, and
+            see what actually changed — iteration counts, file lists,
+            audit volume, the works.
           </p>
         </div>
         <div class="panel hidden" id="analyze-detail">
@@ -710,6 +726,28 @@
             <div id="audit-table-wrap"></div>
           </div>
           <div id="ad-raw" class="ad-panel hidden"><pre id="raw-pre"></pre></div>
+        </div>
+        <div class="panel hidden" id="analyze-compare"
+          aria-labelledby="compare-title">
+          <div class="compare-header">
+            <h2 id="compare-title">Comparing two runs</h2>
+            <div class="row">
+              <button class="secondary copy-btn" id="compare-copy-link"
+                title="Copy a link to this comparison">Copy share link</button>
+              <button class="secondary copy-btn" id="compare-swap"
+                title="Swap which run is on the left">Swap A ↔ B</button>
+              <button class="secondary copy-btn" id="compare-exit"
+                title="Back to single-run view">Exit compare</button>
+            </div>
+          </div>
+          <div id="compare-deltas" class="compare-deltas"></div>
+          <div id="compare-heroes" class="compare-grid"></div>
+          <h3 class="compare-section">Iteration timeline</h3>
+          <div id="compare-iterations" class="compare-grid"></div>
+          <h3 class="compare-section">Changed files</h3>
+          <div id="compare-files" class="compare-files"></div>
+          <h3 class="compare-section">Audit roll-up</h3>
+          <div id="compare-audit" class="compare-grid"></div>
         </div>
       </div>
     </div>

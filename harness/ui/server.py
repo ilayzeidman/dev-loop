@@ -15,6 +15,7 @@ Read endpoints
   GET  /api/runs/<task-id>/iteration/<n>/patch  patch diff text
   GET  /api/runs/<task-id>/iteration/<n>/attempts iteration attempts overview
   GET  /api/runs/<task-id>/iteration/<n>/attempt/<a>  full attempt artifact tree
+  GET  /api/runs/<a>/compare/<b>         side-by-side summary of two runs
   GET  /api/scenarios                    list of scenarios
   GET  /api/scenarios/<name>             scenario file list + previews
   GET  /api/scenarios/<name>/file/<fn>   raw scenario file
@@ -661,6 +662,8 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             if len(parts) == 1:
                 self._send_json(200, read_json(run_root / "task_manifest.json")); return
             section = parts[1]
+            if section == "compare" and len(parts) >= 3:
+                self._api_compare_runs(task_id, parts[2]); return
             if section == "report":
                 md = run_root / "final_review_report.md"
                 self._send_text(200, md.read_text(encoding="utf-8") if md.exists() else "(no report yet)",
@@ -693,6 +696,27 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                     self._send_json(200, _attempt_dump(iter_dir / "validations" / f"attempt-{a:03d}"))
                     return
             self._send_text(404, "not found")
+
+        # ----- compare two runs --------------------------------------
+
+        def _api_compare_runs(self, a: str, b: str) -> None:
+            """Side-by-side digest of two runs.
+
+            Returns a single payload so the client renders both columns
+            without chasing per-iteration / audit endpoints twice. The
+            shapes on each side are symmetric; either may be ``None`` if
+            the run doesn't exist, so the UI can show "missing" rather
+             than crashing on a stale share link.
+            """
+            _, r = _resolved()
+            sa = _summarize_run_for_compare(r.runs_dir, a)
+            sb = _summarize_run_for_compare(r.runs_dir, b)
+            if sa is None and sb is None:
+                self._send_json(404, {"error": "neither run exists"}); return
+            self._send_json(200, {
+                "a": sa, "b": sb,
+                "deltas": _compare_deltas(sa, sb),
+            })
 
         # ----- scenarios ---------------------------------------------
 
@@ -1074,6 +1098,13 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 "keywords": "new scenario create add replay",
             })
             items.append({
+                "kind": "action", "id": "compare.runs",
+                "title": "Compare two runs…",
+                "subtitle": "diff hero, iterations, audit side-by-side",
+                "group": "Actions",
+                "keywords": "compare diff two runs side by side delta analyze",
+            })
+            items.append({
                 "kind": "action", "id": "shortcuts.help",
                 "title": "Keyboard shortcuts",
                 "subtitle": "show the cheat-sheet",
@@ -1217,6 +1248,151 @@ def _count_iterations(run_dir: Path) -> int:
     # (e.g. a .DS_Store from a checkout, or a tmp scratch file) must not
     # inflate the count or skew downstream summaries.
     return sum(1 for d in iters.iterdir() if d.is_dir())
+
+
+def _summarize_run_for_compare(runs_dir: Path, task_id: str) -> dict[str, Any] | None:
+    """Compact summary used by the cross-run compare view.
+
+    Returns ``None`` when the run dir or manifest is missing so the
+    endpoint can return a partial payload (missing-A or missing-B)
+    rather than 404'ing the whole comparison — that's what keeps a
+    stale share link from blanking the page.
+    """
+    run_root = runs_dir / task_id
+    tm_path = run_root / "task_manifest.json"
+    if not run_root.exists() or not tm_path.exists():
+        return None
+    try:
+        tm = read_json(tm_path)
+    except Exception:
+        return None
+    tc = tm.get("task_contract") or {}
+    iters: list[dict[str, Any]] = []
+    iters_dir = run_root / "iterations"
+    if iters_dir.exists():
+        for d in sorted(d for d in iters_dir.iterdir() if d.is_dir()):
+            im = _read_safe_json(d / "manifest.json")
+            if not isinstance(im, dict):
+                im = {}
+            code = (im.get("code") or {}) if isinstance(im.get("code"), dict) else {}
+            agent_out = im.get("agent_output") or {}
+            summary = ""
+            if isinstance(agent_out, dict):
+                summary = agent_out.get("summary") or ""
+            v = d / "validations"
+            attempt_count = (
+                sum(1 for x in v.iterdir() if x.is_dir())
+                if v.exists() else 0
+            )
+            # Iteration number is the trailing integer of ``iter-NNN``.
+            try:
+                n = int(d.name.rsplit("-", 1)[1])
+            except (IndexError, ValueError):
+                n = len(iters) + 1
+            iters.append({
+                "i": n,
+                "final_e2e_status": im.get("final_e2e_status"),
+                "summary": summary[:240] if isinstance(summary, str) else "",
+                "changed_files": list(code.get("changed_files") or []),
+                "patch_hash": code.get("patch_hash"),
+                "attempts": attempt_count,
+            })
+
+    # Audit roll-up — counts by status and a short list of capability
+    # names so the user can see at-a-glance which side did more work.
+    audit_path = run_root / "capability_audit.jsonl"
+    audit_by_status: dict[str, int] = {}
+    audit_by_capability: dict[str, int] = {}
+    audit_total = 0
+    if audit_path.exists():
+        for line in audit_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except Exception:
+                continue
+            audit_total += 1
+            status = entry.get("status") or "?"
+            audit_by_status[status] = audit_by_status.get(status, 0) + 1
+            cap = entry.get("capability") or "?"
+            audit_by_capability[cap] = audit_by_capability.get(cap, 0) + 1
+
+    return {
+        "task_id": tm.get("task_id", task_id),
+        "status": tm.get("status"),
+        "final_status": tm.get("final_status"),
+        "stop_reason": tm.get("stop_reason"),
+        "selected_iteration": tm.get("selected_iteration"),
+        "created_at_utc": tm.get("created_at_utc"),
+        "updated_at_utc": tm.get("updated_at_utc"),
+        "duration_seconds": _run_duration_seconds(tm),
+        "goal": tc.get("implementation_goal"),
+        "scenario": tc.get("scenario") or tm.get("scenario"),
+        "iteration_count": len(iters),
+        "iterations": iters,
+        "audit": {
+            "total": audit_total,
+            "by_status": audit_by_status,
+            "by_capability": audit_by_capability,
+        },
+    }
+
+
+def _compare_deltas(a: dict[str, Any] | None,
+                    b: dict[str, Any] | None) -> dict[str, Any]:
+    """High-level summary of what changed from ``a`` to ``b``.
+
+    Pure function over the summary shape so we can keep the analysis
+    server-side (one source of truth) and the client just renders.
+    Every value is either a scalar or a small string so the payload
+    stays a flat dict friendly to React-less DOM building.
+    """
+    if a is None or b is None:
+        return {"both_present": False}
+    # Iteration count delta (positive = b took more iterations).
+    di = (b["iteration_count"] or 0) - (a["iteration_count"] or 0)
+    # Duration delta in seconds (positive = b was slower).
+    da_s = a.get("duration_seconds")
+    db_s = b.get("duration_seconds")
+    dur_delta = (
+        (db_s or 0) - (da_s or 0) if (da_s is not None and db_s is not None) else None
+    )
+    # Per-index iteration status agreement.
+    n = min(a["iteration_count"], b["iteration_count"])
+    same_status = sum(
+        1 for i in range(n)
+        if a["iterations"][i]["final_e2e_status"]
+        == b["iterations"][i]["final_e2e_status"]
+    )
+    first_diverge: int | None = None
+    for i in range(n):
+        if (a["iterations"][i]["final_e2e_status"]
+                != b["iterations"][i]["final_e2e_status"]
+            or a["iterations"][i]["patch_hash"]
+                != b["iterations"][i]["patch_hash"]):
+            first_diverge = i + 1
+            break
+    # Files only touched on one side vs both.
+    files_a = {f for it in a["iterations"] for f in it["changed_files"]}
+    files_b = {f for it in b["iterations"] for f in it["changed_files"]}
+    return {
+        "both_present": True,
+        "same_goal": (a.get("goal") or "") == (b.get("goal") or ""),
+        "same_scenario": (a.get("scenario") or "") == (b.get("scenario") or ""),
+        "same_final_status": a.get("final_status") == b.get("final_status"),
+        "iteration_count_delta": di,
+        "duration_seconds_delta": dur_delta,
+        "iteration_status_agreement": same_status,
+        "iteration_status_compared": n,
+        "first_diverging_iteration": first_diverge,
+        "files_only_a": sorted(files_a - files_b),
+        "files_only_b": sorted(files_b - files_a),
+        "files_both": sorted(files_a & files_b),
+        "audit_total_delta": (
+            (b["audit"]["total"] or 0) - (a["audit"]["total"] or 0)
+        ),
+    }
 
 
 def _summarize_attempts(iter_dir: Path) -> dict[str, Any]:

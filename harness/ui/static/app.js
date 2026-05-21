@@ -1324,12 +1324,17 @@ function renderRunList() {
       const cls = pillClass(status);
       const dur = r.duration_seconds != null ? formatDuration(r.duration_seconds) : "";
       const goal = r.goal ? escapeHtml(truncate(r.goal, 110)) : '<span class="muted">(no contract)</span>';
-      const sel = r.task_id === CURRENT_TASK ? "active" : "";
+      let sel = r.task_id === CURRENT_TASK ? "active" : "";
+      // In compare mode each pinned slot gets its own highlight so the
+      // user can tell at a glance which is A (blue) and which is B (green).
+      let mark = "";
+      if (COMPARE_A && r.task_id === COMPARE_A) { sel = "compare-a"; mark = '<span class="compare-mark">A</span>'; }
+      if (COMPARE_B && r.task_id === COMPARE_B) { sel = "compare-b"; mark = '<span class="compare-mark">B</span>'; }
       html.push(`
         <li data-id="${escapeAttr(r.task_id)}" class="${sel}">
           <div class="run-row">
             <div class="top">
-              <span class="pill ${cls}">${escapeHtml(status || "?")}</span>
+              ${mark}<span class="pill ${cls}">${escapeHtml(status || "?")}</span>
               <strong>${escapeHtml(r.task_id)}</strong>
             </div>
             <div class="goal">${goal}</div>
@@ -1344,7 +1349,17 @@ function renderRunList() {
   }
   list.innerHTML = html.join("");
   $$("#run-list li[data-id]").forEach(li =>
-    li.addEventListener("click", () => selectRun(li.dataset.id)));
+    li.addEventListener("click", () => onRunListClick(li.dataset.id)));
+}
+
+function onRunListClick(taskId) {
+  // In compare mode the list acts like a two-slot picker rather than
+  // a single-selection navigator.
+  if (COMPARE_MODE) {
+    pickForCompare(taskId);
+    return;
+  }
+  selectRun(taskId);
 }
 
 $("#run-filter").addEventListener("input", e => {
@@ -1373,6 +1388,9 @@ async function selectRun(taskId) {
   CURRENT_TASK = taskId;
   // Make sure we're on the Analyze tab even if linked from elsewhere.
   if ($("#tab-analyze").classList.contains("hidden")) showTab("analyze");
+  // Coming back to single-run navigation always exits compare so the
+  // two views never fight over the right pane.
+  $("#analyze-compare").classList.add("hidden");
   $("#analyze-empty").classList.add("hidden");
   $("#analyze-detail").classList.remove("hidden");
   renderRunList();
@@ -1433,6 +1451,9 @@ function renderHero(tm, runMeta) {
       <button class="secondary copy-btn" data-copy-task>Copy task id</button>
       <button class="secondary copy-btn" data-copy-link>Copy share link</button>
       <button class="secondary copy-btn" data-jump-iter>Jump to iterations</button>
+      <button class="secondary copy-btn" data-compare-to
+        title="Pin this as run A and pick a second run to diff against"
+        aria-label="Compare this run with another">Compare to…</button>
     </div>`;
   hero.querySelector("[data-copy-task]").addEventListener("click",
     () => copyToClipboard(tm.task_id || "", "Copied task id"));
@@ -1442,6 +1463,13 @@ function renderHero(tm, runMeta) {
     selectSubview("iterations");
     updateLocationHash();
     $("#ad-iterations").scrollIntoView({behavior: "smooth", block: "start"});
+  });
+  hero.querySelector("[data-compare-to]").addEventListener("click", () => {
+    setCompareMode(true);
+    COMPARE_A = tm.task_id || CURRENT_TASK;
+    renderRunList();
+    updateCompareHint();
+    toast("pick a second run to compare with");
   });
 }
 
@@ -1587,6 +1615,339 @@ async function loadIterations(taskId, tm, runMeta) {
   }));
 }
 
+// ----- Compare two runs -------------------------------------------------
+//
+// State lives in three globals so the run-list renderer can highlight
+// the picked slots without threading them through every call. The
+// compare view is fetched in a single round-trip and rendered
+// directly into the right-pane #analyze-compare panel.
+
+let COMPARE_MODE = false;
+let COMPARE_A = null;
+let COMPARE_B = null;
+let COMPARE_DATA = null;
+
+function setCompareMode(on) {
+  COMPARE_MODE = !!on;
+  $("#compare-mode-toggle").checked = COMPARE_MODE;
+  updateCompareHint();
+  renderRunList();
+  if (!COMPARE_MODE) {
+    exitCompareView();
+  }
+}
+
+function updateCompareHint() {
+  const hint = $("#compare-pick-hint");
+  if (!COMPARE_MODE) { hint.classList.add("hidden"); return; }
+  if (COMPARE_A && !COMPARE_B) {
+    hint.textContent = "pick a 2nd run…";
+    hint.classList.remove("hidden");
+  } else if (!COMPARE_A) {
+    hint.textContent = "pick the 1st run…";
+    hint.classList.remove("hidden");
+  } else {
+    hint.classList.add("hidden");
+  }
+}
+
+function pickForCompare(taskId) {
+  // Click the same slot to drop it; otherwise fill A, then B, then
+  // when both are full rotate (drop A, B becomes A, new -> B).
+  if (taskId === COMPARE_A) { COMPARE_A = null; }
+  else if (taskId === COMPARE_B) { COMPARE_B = null; }
+  else if (!COMPARE_A) { COMPARE_A = taskId; }
+  else if (!COMPARE_B) { COMPARE_B = taskId; }
+  else { COMPARE_A = COMPARE_B; COMPARE_B = taskId; }
+  updateCompareHint();
+  renderRunList();
+  if (COMPARE_A && COMPARE_B) {
+    openCompareView(COMPARE_A, COMPARE_B);
+  } else {
+    // Step back to the empty state so the user sees the prompt.
+    $("#analyze-detail").classList.add("hidden");
+    $("#analyze-compare").classList.add("hidden");
+    $("#analyze-empty").classList.remove("hidden");
+  }
+}
+
+async function openCompareView(a, b) {
+  COMPARE_A = a; COMPARE_B = b;
+  COMPARE_MODE = true;
+  $("#compare-mode-toggle").checked = true;
+  // Make sure we're on Analyze; pull the run list so the sidebar
+  // highlights the two picks even when arrived via a deep link.
+  if ($("#tab-analyze").classList.contains("hidden")) showTab("analyze");
+  if (!RUNS_CACHE.length) {
+    try { await refreshAnalyzeTab(); } catch (_) {}
+  }
+  renderRunList();
+  updateCompareHint();
+  $("#analyze-empty").classList.add("hidden");
+  $("#analyze-detail").classList.add("hidden");
+  $("#analyze-compare").classList.remove("hidden");
+  $("#compare-deltas").innerHTML = '<span class="muted">loading…</span>';
+  $("#compare-heroes").innerHTML = "";
+  $("#compare-iterations").innerHTML = "";
+  $("#compare-files").innerHTML = "";
+  $("#compare-audit").innerHTML = "";
+  updateLocationHash();
+  try {
+    COMPARE_DATA = await getJSON(
+      `/api/runs/${encodeURIComponent(a)}/compare/${encodeURIComponent(b)}`);
+    renderCompare();
+  } catch (e) {
+    $("#compare-deltas").innerHTML =
+      `<span class="muted">error loading compare: ${escapeHtml(String(e))}</span>`;
+  }
+}
+
+function exitCompareView() {
+  COMPARE_A = null; COMPARE_B = null; COMPARE_DATA = null;
+  $("#analyze-compare").classList.add("hidden");
+  updateCompareHint();
+  renderRunList();
+  if (CURRENT_TASK) {
+    $("#analyze-detail").classList.remove("hidden");
+    updateLocationHash();
+  } else {
+    $("#analyze-empty").classList.remove("hidden");
+    if (location.hash.startsWith("#/compare/")) {
+      history.replaceState(null, "", "#/");
+    }
+  }
+}
+
+function renderCompare() {
+  const d = COMPARE_DATA;
+  if (!d) return;
+  $("#compare-deltas").innerHTML = renderCompareDeltas(d);
+  $("#compare-heroes").innerHTML = `
+    ${renderCompareSide("A", d.a)}
+    ${renderCompareSide("B", d.b)}
+  `;
+  $("#compare-iterations").innerHTML = `
+    ${renderCompareIterations("A", d.a, d.deltas)}
+    ${renderCompareIterations("B", d.b, d.deltas)}
+  `;
+  $("#compare-files").innerHTML = renderCompareFiles(d.deltas);
+  $("#compare-audit").innerHTML = `
+    ${renderCompareAudit("A", d.a)}
+    ${renderCompareAudit("B", d.b)}
+  `;
+}
+
+// Pure: builds the delta pill strip from the compare payload. Kept
+// outside the DOM so we can test it.
+function compareDeltaPills(payload) {
+  const d = (payload && payload.deltas) || {};
+  if (!d.both_present) {
+    return [{label: "one run is missing — partial view", cls: "warn"}];
+  }
+  const pills = [];
+  pills.push(d.same_final_status
+    ? {label: "same verdict", cls: "pass"}
+    : {label: "verdict differs", cls: "fail"});
+  if (d.same_scenario) pills.push({label: "same scenario", cls: ""});
+  else pills.push({label: "different scenario", cls: "warn"});
+  if (d.same_goal) pills.push({label: "same goal", cls: ""});
+  else pills.push({label: "different goal", cls: "warn"});
+
+  const di = d.iteration_count_delta;
+  if (di === 0) pills.push({label: "same iteration count", cls: ""});
+  else pills.push({
+    label: (di > 0 ? "B took +" : "B took ") + di + " iter",
+    cls: di < 0 ? "pass" : "warn",
+  });
+
+  const ds = d.duration_seconds_delta;
+  if (ds != null) {
+    if (ds === 0) pills.push({label: "same wall-clock", cls: ""});
+    else pills.push({
+      label: (ds > 0 ? "B slower by " : "B faster by ")
+        + formatDuration(Math.abs(ds)),
+      cls: ds < 0 ? "pass" : "warn",
+    });
+  }
+  if (d.first_diverging_iteration != null) {
+    pills.push({
+      label: "diverge at iter " + d.first_diverging_iteration,
+      cls: "warn",
+    });
+  } else if (d.iteration_status_compared > 0) {
+    pills.push({label: "iterations agree", cls: "pass"});
+  }
+  const af = d.audit_total_delta;
+  if (af != null && af !== 0) {
+    pills.push({
+      label: (af > 0 ? "+" : "") + af + " audit calls (B)",
+      cls: af > 0 ? "warn" : "pass",
+    });
+  }
+  return pills;
+}
+
+function renderCompareDeltas(payload) {
+  return compareDeltaPills(payload).map(
+    p => `<span class="pill ${p.cls}">${escapeHtml(p.label)}</span>`,
+  ).join("");
+}
+
+function renderCompareSide(label, side) {
+  if (!side) {
+    return `<div class="compare-side side-${label.toLowerCase()} missing">
+      <span class="side-label">${escapeHtml(label)}</span>
+      <h4>(run not found)</h4>
+      <p class="muted">This task id doesn't exist on disk anymore. The
+      other side's view still works.</p>
+    </div>`;
+  }
+  const status = side.final_status || side.status || "?";
+  const dur = side.duration_seconds != null
+    ? formatDuration(side.duration_seconds) : "—";
+  const sel = side.selected_iteration;
+  return `<div class="compare-side side-${label.toLowerCase()}">
+    <span class="side-label">Run ${escapeHtml(label)}</span>
+    <h4>
+      <span class="pill ${pillClass(status)}">${escapeHtml(status)}</span>
+      <code class="task-id">${escapeHtml(side.task_id || "")}</code>
+    </h4>
+    <div class="kv-row"><span class="kv-k">goal</span>
+      <span class="kv-v">${escapeHtml(side.goal || "—")}</span></div>
+    ${side.scenario ? `
+      <div class="kv-row"><span class="kv-k">scenario</span>
+        <span class="kv-v"><code>${escapeHtml(side.scenario)}</code></span></div>
+    ` : ""}
+    <div class="kv-row"><span class="kv-k">iterations</span>
+      <span class="kv-v">${side.iteration_count}${sel != null ? ` (selected ${sel})` : ""}</span></div>
+    <div class="kv-row"><span class="kv-k">duration</span>
+      <span class="kv-v">${escapeHtml(dur)}</span></div>
+    ${side.stop_reason ? `
+      <div class="kv-row"><span class="kv-k">stop reason</span>
+        <span class="kv-v"><code>${escapeHtml(side.stop_reason)}</code></span></div>
+    ` : ""}
+    <div class="kv-row"><span class="kv-k">audit calls</span>
+      <span class="kv-v">${side.audit ? side.audit.total : 0}</span></div>
+    <div class="kv-row"><span class="kv-k">started</span>
+      <span class="kv-v"><code>${escapeHtml(side.created_at_utc || "—")}</code></span></div>
+  </div>`;
+}
+
+function renderCompareIterations(label, side, deltas) {
+  if (!side) {
+    return `<div class="compare-side side-${label.toLowerCase()} missing">
+      <span class="side-label">${escapeHtml(label)}</span>
+      <p class="muted">no iterations — run not found</p>
+    </div>`;
+  }
+  const sel = side.selected_iteration;
+  // Walk both sides' iteration lists in parallel for divergence marks.
+  const counterpart = (
+    deltas && deltas.both_present && COMPARE_DATA
+      ? (label === "A" ? COMPARE_DATA.b : COMPARE_DATA.a)
+      : null
+  );
+  const divergeFrom = deltas && deltas.first_diverging_iteration;
+  const items = side.iterations.map(it => {
+    const cls = it.final_e2e_status === "passed" ? "pass"
+              : it.final_e2e_status ? "fail" : "";
+    const selCls = sel === it.i ? "selected" : "";
+    let diverged = "";
+    if (counterpart && counterpart.iterations.length >= it.i) {
+      const other = counterpart.iterations[it.i - 1];
+      if (other && (other.final_e2e_status !== it.final_e2e_status
+                    || other.patch_hash !== it.patch_hash)) {
+        diverged = " diverged";
+      }
+    }
+    return `<span class="compare-iter ${cls} ${selCls}${diverged}"
+      title="iter ${it.i}: ${escapeAttr(it.final_e2e_status || "—")} · ${it.attempts} attempt${it.attempts !== 1 ? "s" : ""}">
+      <span class="dot"></span>iter ${it.i}
+      <span class="muted">·${escapeHtml(it.final_e2e_status || "—")}</span>
+    </span>`;
+  }).join("");
+  const lastSummary = side.iterations.length
+    ? side.iterations[side.iterations.length - 1].summary
+    : "";
+  return `<div class="compare-side side-${label.toLowerCase()}">
+    <span class="side-label">Run ${escapeHtml(label)}</span>
+    <div class="compare-iters">${items || '<span class="muted">no iterations</span>'}</div>
+    ${divergeFrom && label === "A"
+      ? `<div class="iter-summary-line">first diverges at iter ${divergeFrom}</div>`
+      : ""}
+    ${lastSummary ? `<div class="iter-summary-line">${escapeHtml(lastSummary)}</div>` : ""}
+  </div>`;
+}
+
+function renderCompareFiles(deltas) {
+  if (!deltas || !deltas.both_present) {
+    return '<p class="muted">file lists need both runs to be present.</p>';
+  }
+  const fmtList = (files, emptyLabel) => files.length
+    ? `<ul>${files.map(f => `<li><code>${escapeHtml(f)}</code></li>`).join("")}</ul>`
+    : `<ul><li class="muted">${escapeHtml(emptyLabel)}</li></ul>`;
+  return `
+    <div class="compare-file-col only-a">
+      <h5>only in A <span class="count">(${deltas.files_only_a.length})</span></h5>
+      ${fmtList(deltas.files_only_a, "no files unique to A")}
+    </div>
+    <div class="compare-file-col both">
+      <h5>in both <span class="count">(${deltas.files_both.length})</span></h5>
+      ${fmtList(deltas.files_both, "no overlap")}
+    </div>
+    <div class="compare-file-col only-b">
+      <h5>only in B <span class="count">(${deltas.files_only_b.length})</span></h5>
+      ${fmtList(deltas.files_only_b, "no files unique to B")}
+    </div>`;
+}
+
+function renderCompareAudit(label, side) {
+  if (!side) {
+    return `<div class="compare-side side-${label.toLowerCase()} missing">
+      <span class="side-label">${escapeHtml(label)}</span>
+      <p class="muted">no audit data — run not found</p>
+    </div>`;
+  }
+  const audit = side.audit || {total: 0, by_status: {}, by_capability: {}};
+  const byStatus = Object.entries(audit.by_status || {})
+    .sort((a, b) => b[1] - a[1]);
+  const byCap = Object.entries(audit.by_capability || {})
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6);
+  return `<div class="compare-side side-${label.toLowerCase()}">
+    <span class="side-label">Run ${escapeHtml(label)}</span>
+    <h4>${audit.total} call${audit.total !== 1 ? "s" : ""}</h4>
+    ${byStatus.length ? `<div class="kv-row">
+      <span class="kv-k">by status</span>
+      <span class="kv-v">${byStatus.map(
+        ([s, n]) => `<span class="pill ${s === "ok" ? "pass" : "fail"}">${escapeHtml(s)} ${n}</span>`,
+      ).join(" ")}</span></div>` : ""}
+    ${byCap.length ? `<div class="kv-row">
+      <span class="kv-k">top capabilities</span>
+      <span class="kv-v">${byCap.map(
+        ([c, n]) => `<code>${escapeHtml(c)}</code> ×${n}`,
+      ).join("<br>")}</span></div>` : ""}
+  </div>`;
+}
+
+// ----- Compare DOM wiring -----------------------------------------------
+
+$("#compare-mode-toggle").addEventListener("change", e => {
+  setCompareMode(e.target.checked);
+});
+$("#compare-exit").addEventListener("click", exitCompareView);
+$("#compare-swap").addEventListener("click", () => {
+  if (!COMPARE_A || !COMPARE_B) return;
+  const a = COMPARE_A; COMPARE_A = COMPARE_B; COMPARE_B = a;
+  openCompareView(COMPARE_A, COMPARE_B);
+});
+$("#compare-copy-link").addEventListener("click", () => {
+  if (!COMPARE_A || !COMPARE_B) return;
+  const link = location.origin + location.pathname
+    + `#/compare/${encodeURIComponent(COMPARE_A)}/${encodeURIComponent(COMPARE_B)}`;
+  copyToClipboard(link, "Copied compare link");
+});
+
 // Colorize a unified diff. Splits on lines and tags +/-/@@/file headers.
 function renderDiff(text) {
   if (!text || !text.trim()) {
@@ -1708,6 +2069,14 @@ function shareLink() {
 }
 
 function updateLocationHash() {
+  // Compare view wins so the share link round-trips both runs.
+  if (COMPARE_A && COMPARE_B
+      && !$("#analyze-compare").classList.contains("hidden")) {
+    const target = "#/compare/" + encodeURIComponent(COMPARE_A)
+      + "/" + encodeURIComponent(COMPARE_B);
+    if (location.hash !== target) history.replaceState(null, "", target);
+    return;
+  }
   if (!CURRENT_TASK) return;
   const target = "#/run/" + encodeURIComponent(CURRENT_TASK) + "/" + currentSubview();
   if (location.hash !== target) {
@@ -1716,6 +2085,15 @@ function updateLocationHash() {
 }
 
 async function consumeLocationHash() {
+  const mCompare = location.hash.match(/^#\/compare\/([^/]+)\/([^/]+)/);
+  if (mCompare) {
+    const a = decodeURIComponent(mCompare[1]);
+    const b = decodeURIComponent(mCompare[2]);
+    showTab("analyze");
+    await refreshAnalyzeTab().catch(() => {});
+    await openCompareView(a, b);
+    return true;
+  }
   const m = location.hash.match(/^#\/run\/([^/]+)(?:\/([a-z]+))?/);
   if (!m) return false;
   const taskId = decodeURIComponent(m[1]);
@@ -2076,6 +2454,21 @@ function runPaletteAction(id) {
   }
   if (id === "shortcuts.help") {
     openShortcutsHelp();
+    return;
+  }
+  if (id === "compare.runs") {
+    showTab("analyze");
+    refreshAnalyzeTab().then(() => {
+      setCompareMode(true);
+      // If we landed here from a single run that's already selected,
+      // pre-fill slot A so the user only needs to click the second run.
+      if (CURRENT_TASK) {
+        COMPARE_A = CURRENT_TASK;
+        renderRunList();
+        updateCompareHint();
+      }
+      toast("compare mode — pick two runs on the left");
+    }).catch(() => {});
     return;
   }
 }
