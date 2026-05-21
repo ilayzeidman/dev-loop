@@ -28,6 +28,8 @@ Read endpoints
   GET  /api/schemas/<name>               raw schema JSON
   GET  /api/jobs/<id>                    background job status + log
   GET  /api/bundle/export                JSON bundle of this repo's config
+  GET  /api/bundle/templates             list built-in templates (strip cards)
+  GET  /api/bundle/templates/<id>        full bundle body for one template
   GET  /api/palette                      unified jump-to index (Cmd+K)
 
 Write endpoints
@@ -65,6 +67,8 @@ from ..bundle import (
     apply_bundle,
     build_bundle,
     bundle_to_json,
+    list_templates,
+    load_template,
     preview_apply,
 )
 from ..config import (
@@ -253,6 +257,10 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             if p == "/api/playbooks": self._api_list_playbooks(); return
             if p == "/api/schemas": self._api_list_schemas(); return
             if p == "/api/bundle/export": self._api_bundle_export(); return
+            if p == "/api/bundle/templates": self._api_bundle_templates(); return
+            if p.startswith("/api/bundle/templates/"):
+                self._api_bundle_template_get(
+                    unquote(p[len("/api/bundle/templates/"):])); return
             if p == "/api/palette": self._api_palette(); return
             if p.startswith("/api/runs/"):
                 self._api_run_subroute(p[len("/api/runs/"):]); return
@@ -575,6 +583,26 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
+
+        def _api_bundle_templates(self) -> None:
+            """Strip-card metadata for every built-in template.
+
+            One round-trip so the Share & reuse tab can render the
+            horizontal strip without per-template probes. The full
+            bundle body is fetched lazily by ``/api/bundle/templates/<id>``
+            when the user clicks a card.
+            """
+            self._send_json(200, {"templates": list_templates()})
+
+        def _api_bundle_template_get(self, template_id: str) -> None:
+            """Full bundle body for one template — feeds into the existing
+            preview / import pipeline so the client renders the diff with
+            ``/api/bundle/preview`` exactly as it does for user uploads."""
+            try:
+                bundle = load_template(template_id)
+            except BundleError as e:
+                self._send_json(404, {"error": str(e)}); return
+            self._send_json(200, {"bundle": bundle})
 
         def _api_bundle_preview(self, body: Any) -> None:
             """Dry-run an incoming bundle. Returns the diff vs. this repo.
@@ -1124,6 +1152,21 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 "group": "Actions",
                 "keywords": "help shortcuts keys cheat sheet",
             })
+
+            # 8. Templates — one entry per built-in starter bundle so users
+            # can keyboard-jump straight into "preview & apply this template"
+            # without first navigating to Share & reuse.
+            for t in list_templates():
+                items.append({
+                    "kind": "template", "id": t["id"],
+                    "title": f"Template · {t['title']}",
+                    "subtitle": t["summary"] or "starter bundle",
+                    "group": "Templates",
+                    "keywords": (
+                        f"template starter bundle apply {t['id']} "
+                        f"{t['title']} {' '.join(t.get('tags') or [])}"
+                    ),
+                })
 
             self._send_json(200, {"items": items})
 

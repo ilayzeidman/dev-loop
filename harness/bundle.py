@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .bundle_templates import TEMPLATE_DIR
 from .config import (
     CONFIG_DIR_NAME,
     CONFIG_FILE_NAME,
@@ -511,3 +512,88 @@ def _is_within(p: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Built-in templates
+# ---------------------------------------------------------------------------
+
+
+def _template_meta(bundle: dict[str, Any], fallback_id: str) -> dict[str, Any]:
+    meta = bundle.get("template") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    return {
+        "id": meta.get("id") or fallback_id,
+        "title": meta.get("title") or fallback_id,
+        "summary": meta.get("summary") or "",
+        "tags": list(meta.get("tags") or []),
+        "order": meta.get("order") if isinstance(meta.get("order"), int) else 1000,
+    }
+
+
+def _template_includes(bundle: dict[str, Any]) -> dict[str, int]:
+    """Tiny inventory for the strip cards: how many of each piece."""
+    cfg = bundle.get("config") or {}
+    has_config = bool(cfg.get("yaml") or cfg.get("present"))
+    scenarios = bundle.get("scenarios") or []
+    playbooks = bundle.get("playbooks") or []
+    return {
+        "config": 1 if has_config else 0,
+        "scenarios": len(scenarios),
+        "playbooks": len(playbooks),
+    }
+
+
+def list_templates() -> list[dict[str, Any]]:
+    """Return strip-card metadata for every bundled template.
+
+    Each entry is ``{id, title, summary, tags, order, includes}``. The
+    full bundle is loaded by :func:`load_template` on demand so the
+    listing stays cheap.
+
+    A malformed template file is skipped (logged via the order key
+    flipping to ``9999``) rather than failing the whole listing.
+    """
+    out: list[dict[str, Any]] = []
+    if not TEMPLATE_DIR.exists():
+        return out
+    for f in sorted(TEMPLATE_DIR.glob("*.json")):
+        try:
+            bundle = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        try:
+            validate_bundle(bundle)
+        except BundleError:
+            continue
+        meta = _template_meta(bundle, f.stem)
+        meta["includes"] = _template_includes(bundle)
+        out.append(meta)
+    out.sort(key=lambda t: (t["order"], t["id"]))
+    return out
+
+
+def load_template(template_id: str) -> dict[str, Any]:
+    """Return the bundle body for ``template_id``.
+
+    The returned dict is the same shape ``build_bundle`` emits, so it
+    flows straight into :func:`preview_apply` and :func:`apply_bundle`.
+    Raises :class:`BundleError` if the id is unknown or the on-disk
+    template fails validation — never returns an unsafe bundle.
+    """
+    if not _is_safe_path_segment(template_id):
+        raise BundleError(f"invalid template id: {template_id!r}")
+    f = TEMPLATE_DIR / f"{template_id}.json"
+    try:
+        f.resolve().relative_to(TEMPLATE_DIR.resolve())
+    except ValueError:
+        raise BundleError(f"invalid template id: {template_id!r}")
+    if not f.exists():
+        raise BundleError(f"unknown template: {template_id!r}")
+    try:
+        bundle = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        raise BundleError(f"template {template_id!r} is unreadable: {e}")
+    validate_bundle(bundle)
+    return bundle

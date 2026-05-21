@@ -455,6 +455,80 @@ def test_bundle_import_respects_include_filter(tmp_path: Path):
         assert not (tmp_path / ".dev-loop" / "config.yaml").exists()
 
 
+def test_bundle_templates_endpoint_lists_starters(tmp_path: Path):
+    """The templates strip fetches one endpoint and renders every card.
+
+    The cards must include the curated starter ids the Share & reuse tab
+    advertises on first run.
+    """
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/bundle/templates")
+        assert status == 200
+        data = json.loads(body)
+        ids = [t["id"] for t in data["templates"]]
+        for required in ("minimal-python", "fast-iteration", "cautious-review"):
+            assert required in ids, f"missing template: {required}"
+        # Strip-card payload contract.
+        for t in data["templates"]:
+            assert t["title"]
+            assert isinstance(t["tags"], list)
+            inc = t["includes"]
+            assert set(inc.keys()) == {"config", "scenarios", "playbooks"}
+
+
+def test_bundle_template_get_then_preview_then_apply(tmp_path: Path):
+    """Clicking a template card runs three calls in sequence:
+    fetch the bundle body, preview it, apply it. All three must work
+    against a brand-new repo with no prior configuration.
+    """
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/bundle/templates/minimal-python")
+        assert status == 200
+        bundle = json.loads(body)["bundle"]
+        assert bundle["format"] == "dev-loop-bundle"
+
+        status, preview = _post_json(port, "/api/bundle/preview", {"bundle": bundle})
+        assert status == 200
+        # No conflicts in a pristine repo.
+        assert preview["totals"]["conflict"] == 0
+        new_paths = {c["path"] for c in preview["changes"] if c["status"] == "new"}
+        assert ".dev-loop/config.yaml" in new_paths
+
+        status, report = _post_json(port, "/api/bundle/import",
+                                    {"bundle": bundle, "on_conflict": "skip"})
+        assert status == 200
+        actions = {a["action"] for a in report["actions"]}
+        assert actions <= {"wrote", "identical"}
+        assert (tmp_path / ".dev-loop" / "config.yaml").exists()
+
+
+def test_bundle_template_get_unknown_id_returns_404(tmp_path: Path):
+    """Unknown id is a client error, not a 500."""
+    import urllib.error
+
+    with _server(tmp_path) as (port, _):
+        try:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/bundle/templates/no-such-thing",
+                timeout=2,
+            )
+            raise AssertionError("expected 404")
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
+
+
+def test_palette_lists_template_actions(tmp_path: Path):
+    """Cmd+K should let the user jump straight to a template without
+    navigating Share & reuse first."""
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/palette")
+        assert status == 200
+        items = json.loads(body)["items"]
+        kinds = [(it["kind"], it["id"]) for it in items]
+        assert ("template", "minimal-python") in kinds
+        assert ("template", "fast-iteration") in kinds
+
+
 def test_config_validate_endpoint_resolves_paths(tmp_path: Path):
     """The validate endpoint should resolve relative paths against the repo
     root so the Build > Config preview shows the real on-disk targets."""

@@ -1,0 +1,41 @@
+{
+  "format": "dev-loop-bundle",
+  "format_version": 1,
+  "template": {
+    "id": "replay-playground",
+    "title": "Replay playground",
+    "summary": "Two replay scenarios pre-loaded: the smoke-test starter and a failing-then-passing flaky-test fixture.",
+    "tags": ["replay", "demo", "scenarios"],
+    "order": 40
+  },
+  "source": {
+    "repo_name": "template:replay-playground",
+    "repo_path": "(bundled template)"
+  },
+  "note": "Replay-playground template — two scenarios so you can see passed and failed verdicts side-by-side.",
+  "config": {
+    "present": true,
+    "yaml": "# dev-loop configuration for this repository.\n#\n# Template: replay-playground\n\nruns_dir: .dev-loop/runs\ndefault_provider: replay\nscenarios_dir: scenarios\n\npolicy:\n  max_code_iterations: 5\n  max_validation_attempts_per_iteration: 2\n  max_diagnostic_rounds_per_failure: 3\n  max_total_wall_clock_minutes: 60\n\nnotes: replay-playground template — explore the analyze tab with multiple verdicts.\n"
+  },
+  "scenarios": [
+    {
+      "name": "hello-dev-loop",
+      "files": {
+        "task_request.md": "# Hello, dev-loop\n\nThis is the starter scenario. The agent (in replay mode) will\npretend to implement a tiny change and the harness will report a\npassing E2E. Use it to verify your setup before pointing dev-loop\nat a real task.\n",
+        "task_contract.json": "{\n  \"type\": \"task_contract\",\n  \"implementation_goal\": \"Demonstrate a clean end-to-end run with the replay provider.\",\n  \"assumptions\": [\"no external infrastructure is needed for this demo\"],\n  \"success_criteria\": [\"hello-dev-loop-e2e reports passed\"],\n  \"non_goals\": [\"touching production code\"],\n  \"likely_components\": [],\n  \"validation_plan\": [\"replay-only E2E\"],\n  \"ambiguities\": [],\n  \"can_start_without_human\": true\n}\n",
+        "implementation_result.json": "{\n  \"type\": \"implementation_result\",\n  \"summary\": \"Demo implementation — no real code change.\",\n  \"hypothesis\": \"If the harness can replay this scenario it is wired up correctly.\",\n  \"confidence\": \"high\",\n  \"expected_validation\": [\"hello-dev-loop-e2e passes\"],\n  \"risk_notes\": [],\n  \"claimed_changed_files\": []\n}\n",
+        "e2e_result.json": "{\n  \"status\": \"passed\",\n  \"test_suite\": \"hello-dev-loop-e2e\",\n  \"duration_seconds\": 1\n}\n"
+      }
+    },
+    {
+      "name": "flaky-timeout-001",
+      "files": {
+        "task_request.md": "# Flaky timeout reproducer\n\nA replay fixture that simulates the loop seeing a timeout failure on\nfirst attempt and a green E2E on retry. Useful for exercising the\nAnalyze tab's iteration timeline and diff colorizer with a non-trivial\nverdict.\n",
+        "task_contract.json": "{\n  \"type\": \"task_contract\",\n  \"implementation_goal\": \"Stabilise a flaky integration test that times out under load.\",\n  \"assumptions\": [\"the failure is timing-related, not a logic bug\"],\n  \"success_criteria\": [\"integration-suite reports passed on the second iteration\"],\n  \"non_goals\": [\"rewriting the test infrastructure\"],\n  \"likely_components\": [\"tests/integration/timeout_test.py\"],\n  \"validation_plan\": [\"replay-only E2E — failure then pass\"],\n  \"ambiguities\": [],\n  \"can_start_without_human\": true\n}\n",
+        "implementation_result.json": "{\n  \"type\": \"implementation_result\",\n  \"summary\": \"Add a bounded retry around the integration timeout assertion.\",\n  \"hypothesis\": \"Retry once on TimeoutError; the underlying flake clears within a few seconds.\",\n  \"confidence\": \"medium\",\n  \"expected_validation\": [\"integration-suite passes after one retry\"],\n  \"risk_notes\": [\"masking a genuine slow-path regression\"],\n  \"claimed_changed_files\": [\"tests/integration/timeout_test.py\"]\n}\n",
+        "e2e_result.json": "{\n  \"status\": \"passed\",\n  \"test_suite\": \"integration-suite\",\n  \"duration_seconds\": 4\n}\n"
+      }
+    }
+  ],
+  "playbooks": []
+}

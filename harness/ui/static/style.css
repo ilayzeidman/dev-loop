@@ -655,6 +655,38 @@ button:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
   border-top: 1px solid var(--border);
   padding-top: 1em; margin-top: 1.2em;
 }
+.templates-strip {
+  display: flex; flex-wrap: nowrap; gap: 0.7em;
+  overflow-x: auto; padding: 0.4em 0.1em 0.6em;
+  scroll-snap-type: x proximity;
+}
+.tpl-card {
+  flex: 0 0 240px; scroll-snap-align: start;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0.7em 0.8em;
+  display: flex; flex-direction: column; gap: 0.45em;
+  cursor: pointer; text-align: left; font: inherit; color: inherit;
+}
+.tpl-card:hover, .tpl-card:focus-visible {
+  border-color: var(--accent); outline: none;
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.tpl-card.is-active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.tpl-card-title { font-weight: 600; font-size: 0.95em; }
+.tpl-card-summary {
+  color: var(--muted); font-size: 0.83em; line-height: 1.35;
+  flex: 1;
+}
+.tpl-card-badges {
+  display: flex; flex-wrap: wrap; gap: 0.3em; margin-top: 0.2em;
+}
+.tpl-card-badges .pill { font-size: 0.72em; padding: 0.1em 0.5em; }
+.tpl-card-tags {
+  color: var(--muted); font-size: 0.72em; letter-spacing: 0.02em;
+}
 .share-section:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
 .share-section h3 { margin: 0.2em 0 0.5em; }
 #bundle-paste {

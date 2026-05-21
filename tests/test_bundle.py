@@ -277,3 +277,79 @@ def test_export_import_roundtrip_into_fresh_repo(tmp_path: Path):
     again = apply_bundle(bundle, repo_b)
     actions = {a["action"] for a in again["actions"]}
     assert actions <= {"identical"}
+
+
+# ---------------------------------------------------------------------------
+# Built-in templates
+# ---------------------------------------------------------------------------
+
+
+def test_list_templates_returns_curated_starter_set():
+    """The Share & reuse strip needs at least the documented templates,
+    each with the strip-card metadata the UI binds to."""
+    from harness.bundle import list_templates
+
+    items = list_templates()
+    assert len(items) >= 3, "expected curated starter set"
+    ids = [t["id"] for t in items]
+    # The bundled starters every fresh user lands with.
+    for required in ("minimal-python", "fast-iteration", "cautious-review"):
+        assert required in ids, f"missing template: {required}"
+    # Strip-card contract: every entry has title/summary/includes.
+    for t in items:
+        assert t["title"]
+        assert isinstance(t["summary"], str)
+        assert isinstance(t["tags"], list)
+        inc = t["includes"]
+        assert set(inc.keys()) == {"config", "scenarios", "playbooks"}
+
+
+def test_load_template_returns_validated_bundle():
+    """Every shipped template must round-trip through ``validate_bundle``;
+    a malformed file in this dir would break the strip silently."""
+    from harness.bundle import list_templates, load_template
+
+    for t in list_templates():
+        bundle = load_template(t["id"])
+        # The exact same shape ``build_bundle`` emits.
+        assert bundle["format"] == BUNDLE_FORMAT
+        assert bundle["format_version"] == BUNDLE_FORMAT_VERSION
+        # Sanity: feeds straight into the existing importer pipeline.
+        validate_bundle(bundle)
+
+
+def test_load_template_rejects_unsafe_id():
+    """The ``<id>`` endpoint takes user input; path traversal must fail."""
+    from harness.bundle import load_template
+
+    for bad in ("../etc/passwd", "..", "foo/bar", "minimal-python/x", ""):
+        with pytest.raises(BundleError):
+            load_template(bad)
+
+
+def test_load_template_unknown_id_raises():
+    from harness.bundle import load_template
+
+    with pytest.raises(BundleError, match="unknown template"):
+        load_template("does-not-exist")
+
+
+def test_template_applies_into_fresh_repo(tmp_path: Path):
+    """End-to-end: load a template, preview it, apply it. Nothing the user
+    is going to encounter on first run is allowed to silently break."""
+    from harness.bundle import load_template
+
+    bundle = load_template("minimal-python")
+    preview = preview_apply(bundle, tmp_path)
+    # A fresh dir starts with no conflicts.
+    assert not any(c["status"] == "conflict" for c in preview["changes"])
+    # The template ships a config and the starter scenario.
+    paths = {c["path"] for c in preview["changes"]}
+    assert ".dev-loop/config.yaml" in paths
+    assert any(p.startswith("scenarios/hello-dev-loop/") for p in paths)
+
+    report = apply_bundle(bundle, tmp_path)
+    assert all(a["action"] in ("wrote", "identical") for a in report["actions"])
+    assert (tmp_path / ".dev-loop" / "config.yaml").exists()
+    assert (tmp_path / "scenarios" / "hello-dev-loop"
+            / "task_contract.json").exists()

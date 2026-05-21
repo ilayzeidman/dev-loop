@@ -1,0 +1,22 @@
+{
+  "format": "dev-loop-bundle",
+  "format_version": 1,
+  "template": {
+    "id": "fast-iteration",
+    "title": "Fast iteration",
+    "summary": "Tight policy for rapid experiments: low iteration cap, short wall-clock, single validation pass.",
+    "tags": ["fast", "experiment", "policy"],
+    "order": 20
+  },
+  "source": {
+    "repo_name": "template:fast-iteration",
+    "repo_path": "(bundled template)"
+  },
+  "note": "Fast-iteration template — tuned for quick smoke runs.",
+  "config": {
+    "present": true,
+    "yaml": "# dev-loop configuration for this repository.\n#\n# Template: fast-iteration\n# Optimised for getting a verdict in under a minute.\n\nruns_dir: .dev-loop/runs\ndefault_provider: replay\nscenarios_dir: scenarios\n\npolicy:\n  max_code_iterations: 2\n  max_validation_attempts_per_iteration: 1\n  max_diagnostic_rounds_per_failure: 1\n  max_total_wall_clock_minutes: 10\n\nnotes: fast-iteration template — shrink the loop, fail fast.\n"
+  },
+  "scenarios": [],
+  "playbooks": []
+}

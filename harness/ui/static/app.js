@@ -960,6 +960,95 @@ async function refreshBuildShare() {
   } catch (e) {
     $("#bundle-export-status").textContent = "error: " + e;
   }
+  await refreshTemplatesStrip();
+}
+
+let TEMPLATES_CACHE = null;
+let ACTIVE_TEMPLATE_ID = null;
+
+async function refreshTemplatesStrip() {
+  const strip = $("#templates-strip");
+  if (!strip) return;
+  try {
+    const {templates} = await getJSON("/api/bundle/templates");
+    TEMPLATES_CACHE = templates;
+    if (!templates.length) {
+      strip.innerHTML = '<div class="muted">no built-in templates installed</div>';
+      return;
+    }
+    strip.innerHTML = templates.map(t => renderTemplateCard(t)).join("");
+    $$(".tpl-card", strip).forEach(card => {
+      card.addEventListener("click", () => applyTemplateById(card.dataset.tplId));
+      card.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          applyTemplateById(card.dataset.tplId);
+        }
+      });
+    });
+  } catch (e) {
+    strip.innerHTML = `<div class="muted">error loading templates: ${escapeHtml(String(e))}</div>`;
+  }
+}
+
+function renderTemplateCard(t) {
+  const inc = t.includes || {};
+  const badges = [];
+  if (inc.config) badges.push('<span class="pill">config</span>');
+  if (inc.scenarios) badges.push(
+    `<span class="pill">${inc.scenarios} scenario${inc.scenarios === 1 ? "" : "s"}</span>`);
+  if (inc.playbooks) badges.push(
+    `<span class="pill">${inc.playbooks} playbook${inc.playbooks === 1 ? "" : "s"}</span>`);
+  const tags = (t.tags || []).join(" · ");
+  const active = (t.id === ACTIVE_TEMPLATE_ID) ? " is-active" : "";
+  return `
+    <button type="button" class="tpl-card${active}"
+      role="listitem" data-tpl-id="${escapeAttr(t.id)}"
+      aria-label="Apply template: ${escapeAttr(t.title)}">
+      <div class="tpl-card-title">${escapeHtml(t.title)}</div>
+      <div class="tpl-card-summary">${escapeHtml(t.summary || "")}</div>
+      <div class="tpl-card-badges">${badges.join("")}</div>
+      ${tags ? `<div class="tpl-card-tags">${escapeHtml(tags)}</div>` : ""}
+    </button>`;
+}
+
+async function applyTemplateById(id) {
+  // Mark the card as active so the user sees which template the
+  // preview below maps to.
+  ACTIVE_TEMPLATE_ID = id;
+  $$(".tpl-card").forEach(c => {
+    c.classList.toggle("is-active", c.dataset.tplId === id);
+  });
+  $("#bundle-preview-status").textContent = "loading template…";
+  try {
+    const {bundle} = await getJSON(
+      `/api/bundle/templates/${encodeURIComponent(id)}`);
+    // Pipe the template into the same preview machinery that user
+    // uploads use — one importer, no special case.
+    $("#bundle-paste").value = JSON.stringify(bundle, null, 2);
+    const res = await fetch("/api/bundle/preview", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({bundle}),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({error: res.statusText}));
+      $("#bundle-preview-status").textContent = "error: " + (err.error || res.status);
+      return;
+    }
+    const preview = await res.json();
+    BUNDLE_PREVIEW = {...preview, bundle};
+    BUNDLE_INCLUDE = new Set(preview.changes
+      .filter(c => c.status !== "identical")
+      .map(c => c.path));
+    renderBundlePreview();
+    $("#bundle-preview-status").textContent = "";
+    const el = $("#bundle-preview");
+    if (el) el.scrollIntoView({block: "nearest", behavior: "smooth"});
+    toast(`previewing template: ${id}`);
+  } catch (e) {
+    $("#bundle-preview-status").textContent = "error: " + e;
+  }
 }
 
 let LAST_BUNDLE = null;
@@ -1022,6 +1111,8 @@ $("#bundle-clear").addEventListener("click", () => {
   $("#bundle-preview-status").textContent = "";
   $("#bundle-apply-report").innerHTML = "";
   BUNDLE_PREVIEW = null;
+  ACTIVE_TEMPLATE_ID = null;
+  $$(".tpl-card").forEach(c => c.classList.remove("is-active"));
 });
 
 $("#bundle-preview-btn").addEventListener("click", async () => {
@@ -2604,6 +2695,13 @@ function routePaletteItem(it) {
       return;
     case "action":
       runPaletteAction(it.id);
+      return;
+    case "template":
+      showTab("build");
+      selectBuilder("share");
+      setTimeout(() => {
+        applyTemplateById(it.id).catch(() => {});
+      }, 100);
       return;
   }
 }

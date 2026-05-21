@@ -1,0 +1,22 @@
+{
+  "format": "dev-loop-bundle",
+  "format_version": 1,
+  "template": {
+    "id": "gpu-triage-starter",
+    "title": "GPU E2E triage",
+    "summary": "Loop policy tuned for hunting flaky GPU/infra failures: long wall-clock, deeper diagnostics, more validation passes.",
+    "tags": ["gpu", "infra", "triage", "policy"],
+    "order": 50
+  },
+  "source": {
+    "repo_name": "template:gpu-triage-starter",
+    "repo_path": "(bundled template)"
+  },
+  "note": "GPU-triage template — generous diagnostic rounds for cross-system failure investigations.",
+  "config": {
+    "present": true,
+    "yaml": "# dev-loop configuration for this repository.\n#\n# Template: gpu-triage-starter\n# Workflow: investigate flaky GPU/infra failures across logs + metrics +\n# Jenkins. Trade speed for thoroughness; the playbooks shipped with the\n# harness do the heavy lifting.\n\nruns_dir: .dev-loop/runs\ndefault_provider: replay\nscenarios_dir: scenarios\n\npolicy:\n  max_code_iterations: 8\n  max_validation_attempts_per_iteration: 3\n  max_diagnostic_rounds_per_failure: 5\n  max_total_wall_clock_minutes: 180\n\nnotes: gpu-triage-starter template — bring your own Jenkins/Grafana fixtures.\n"
+  },
+  "scenarios": [],
+  "playbooks": []
+}
