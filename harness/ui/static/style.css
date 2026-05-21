@@ -404,6 +404,54 @@ button:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
   border-radius: 3px; word-break: break-all; }
 .cfg-resolved-notes { font-size: 0.82em; margin-top: 0.5em; }
 
+/* Build > Scenarios (structured form) ----------------------------------- */
+.sc-toolbar { margin-bottom: 0.4em; }
+.sc-toolbar select { flex: 1 1 16em; max-width: 28em; }
+#sc-dirty-pill.dirty { color: var(--warn); font-size: 0.78em; }
+.sc-path { font-family: ui-monospace, monospace; font-size: 0.8em;
+  margin-left: auto; word-break: break-all; }
+
+.sc-new-form {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 0.85em 1em; background: var(--panel-2); margin: 0.7em 0 1em 0;
+}
+.sc-new-form.hidden { display: none; }
+.sc-new-form h3 { margin: 0 0 0.6em 0; font-size: 0.95em; }
+
+#sc-form.hidden, #sc-raw-pane.hidden, #sc-form-actions.hidden { display: none; }
+#sc-mode-tabs.hidden { display: none; }
+
+.sc-list { display: grid; gap: 0.35em; }
+.sc-list-row { display: flex; gap: 0.4em; align-items: center; }
+.sc-list-row input[type=text] { flex: 1 1 auto; background: var(--code); }
+.sc-list-row .sc-list-del {
+  background: var(--panel-2); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 6px;
+  width: 2em; height: 2em; flex-shrink: 0;
+  font-size: 1em; padding: 0; line-height: 1;
+}
+.sc-list-row .sc-list-del:hover { color: var(--err); border-color: var(--err); }
+.sc-list-add {
+  background: transparent; color: var(--accent);
+  border: 1px dashed var(--border); border-radius: 6px;
+  padding: 0.35em 0.75em; font-weight: 500; font-size: 0.85em;
+  align-self: start;
+}
+.sc-list-add:hover { border-color: var(--accent); }
+
+.sc-list-empty {
+  color: var(--muted); font-style: italic; font-size: 0.85em;
+  padding: 0.25em 0;
+}
+
+.sc-other-files { list-style: none; padding-left: 0; margin: 0.2em 0; }
+.sc-other-files li { padding: 0.1em 0; font-size: 0.85em; }
+.sc-other-files li code { background: var(--code);
+  padding: 0.05em 0.4em; border-radius: 3px; }
+.sc-other-files li.sc-other-empty { font-style: italic; }
+
+#sc-textarea { font-size: 0.85em; }
+
 /* Share & reuse (bundles) ------------------------------------------------ */
 .share-section {
   border-top: 1px solid var(--border);

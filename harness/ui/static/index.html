@@ -273,11 +273,226 @@
 
         <div class="panel hidden" id="builder-scenarios">
           <h2>Replay scenarios</h2>
-          <div class="row">
-            <select id="sc-select"></select>
-            <button id="sc-new">+ new</button>
+          <p class="muted">
+            Scenarios are canned outputs the replay agent reads back so you
+            can exercise the full loop without an LLM. Edit them as a form;
+            the four JSON files are written for you.
+          </p>
+
+          <div class="row sc-toolbar">
+            <select id="sc-select" aria-label="Select a scenario"></select>
+            <button id="sc-new-toggle" class="secondary">+ new scenario</button>
+            <button id="sc-run" title="Launch /implement against this scenario"
+              aria-label="Run this scenario">Run this scenario</button>
+            <span id="sc-dirty-pill" class="muted"></span>
           </div>
-          <div id="sc-detail"></div>
+
+          <!-- Inline new-scenario form (no prompt() dialogs) -->
+          <div id="sc-new-form" class="sc-new-form hidden">
+            <h3>Create a new scenario</h3>
+            <div class="cfg-field">
+              <label class="cfg-label" for="sc-new-name">Name (slug)</label>
+              <input id="sc-new-name" type="text"
+                placeholder="e.g. encoder-oom-001"
+                pattern="[A-Za-z0-9_.\-]+">
+              <div class="cfg-help">
+                Used as the directory name under
+                <code id="sc-new-name-hint">scenarios/</code>. Letters, digits,
+                <code>-</code>, <code>_</code> and <code>.</code> only.
+              </div>
+            </div>
+            <div class="cfg-field">
+              <label class="cfg-label" for="sc-new-goal">Implementation goal</label>
+              <input id="sc-new-goal" type="text"
+                placeholder="One-sentence description of what the agent should do.">
+              <div class="cfg-help">Becomes <code>task_contract.implementation_goal</code>.</div>
+            </div>
+            <div class="row">
+              <button id="sc-new-create">Create</button>
+              <button id="sc-new-cancel" class="secondary">Cancel</button>
+              <span id="sc-new-status" class="muted"></span>
+            </div>
+          </div>
+
+          <p class="muted hidden" id="sc-empty">
+            No scenarios yet. Create one above, or use the starter via
+            <a href="#" id="sc-empty-overview-link">Overview &gt; Set up this repo</a>.
+          </p>
+
+          <!-- Mode toggle: structured form vs raw files -->
+          <div class="cfg-mode-tabs" id="sc-mode-tabs">
+            <button data-sc-mode="form" class="active">Form</button>
+            <button data-sc-mode="raw">Raw files</button>
+            <span class="muted sc-path" id="sc-path"></span>
+          </div>
+
+          <!-- Structured form ------------------------------------------- -->
+          <form id="sc-form" class="cfg-form" autocomplete="off">
+
+            <section class="cfg-group">
+              <h3>Task request</h3>
+              <p class="muted cfg-section-blurb">
+                The user-facing prompt for this scenario, in markdown.
+              </p>
+              <div class="cfg-field" data-sc-field="task_request">
+                <textarea id="scf-task_request" rows="4"
+                  placeholder="What is the agent being asked to do?"></textarea>
+                <div class="cfg-help">
+                  Written to <code>task_request.md</code>. The first line
+                  doubles as the request shown on the Run tab.
+                </div>
+              </div>
+            </section>
+
+            <section class="cfg-group">
+              <h3>Task contract</h3>
+              <p class="muted cfg-section-blurb">
+                The agent's restatement of the task — goal, success
+                criteria, scope.
+              </p>
+              <div class="cfg-field" data-sc-field="task_contract.implementation_goal">
+                <label class="cfg-label" for="scf-goal">Implementation goal</label>
+                <input id="scf-goal" type="text"
+                  placeholder="What does success look like, in one sentence?">
+                <div class="cfg-help">Required.</div>
+              </div>
+              <div class="cfg-field" data-sc-field="task_contract.success_criteria">
+                <label class="cfg-label">Success criteria</label>
+                <div class="sc-list" data-sc-list="task_contract.success_criteria"></div>
+                <div class="cfg-help">
+                  At least one is recommended (e.g. "E2E gpu-streaming-e2e
+                  reaches PLAYING").
+                </div>
+              </div>
+              <div class="cfg-field" data-sc-field="task_contract.assumptions">
+                <label class="cfg-label">Assumptions</label>
+                <div class="sc-list" data-sc-list="task_contract.assumptions"></div>
+              </div>
+              <div class="cfg-field" data-sc-field="task_contract.non_goals">
+                <label class="cfg-label">Non-goals</label>
+                <div class="sc-list" data-sc-list="task_contract.non_goals"></div>
+              </div>
+              <div class="cfg-field" data-sc-field="task_contract.likely_components">
+                <label class="cfg-label">Likely components</label>
+                <div class="sc-list" data-sc-list="task_contract.likely_components"></div>
+              </div>
+              <div class="cfg-field" data-sc-field="task_contract.validation_plan">
+                <label class="cfg-label">Validation plan</label>
+                <div class="sc-list" data-sc-list="task_contract.validation_plan"></div>
+              </div>
+              <div class="cfg-field" data-sc-field="task_contract.ambiguities">
+                <label class="cfg-label">Ambiguities</label>
+                <div class="sc-list" data-sc-list="task_contract.ambiguities"></div>
+              </div>
+              <div class="cfg-field" data-sc-field="task_contract.can_start_without_human">
+                <label class="cfg-label">
+                  <input type="checkbox" id="scf-can_start_without_human" style="width:auto;margin-right:0.4em">
+                  Can start without human input
+                </label>
+                <div class="cfg-help">
+                  Uncheck to flag the scenario as needing clarification before
+                  the loop begins.
+                </div>
+              </div>
+            </section>
+
+            <section class="cfg-group">
+              <h3>Implementation result</h3>
+              <p class="muted cfg-section-blurb">
+                What the (replay) agent "did" — the summary, hypothesis, and
+                files it claims to have touched.
+              </p>
+              <div class="cfg-field" data-sc-field="implementation_result.summary">
+                <label class="cfg-label" for="scf-summary">Summary</label>
+                <input id="scf-summary" type="text"
+                  placeholder="One-line summary of the change.">
+              </div>
+              <div class="cfg-field" data-sc-field="implementation_result.hypothesis">
+                <label class="cfg-label" for="scf-hypothesis">Hypothesis</label>
+                <input id="scf-hypothesis" type="text"
+                  placeholder="Why this change should fix the failure.">
+              </div>
+              <div class="cfg-field" data-sc-field="implementation_result.confidence">
+                <label class="cfg-label" for="scf-confidence">Confidence</label>
+                <select id="scf-confidence">
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                </select>
+              </div>
+              <div class="cfg-field" data-sc-field="implementation_result.expected_validation">
+                <label class="cfg-label">Expected validation</label>
+                <div class="sc-list" data-sc-list="implementation_result.expected_validation"></div>
+              </div>
+              <div class="cfg-field" data-sc-field="implementation_result.risk_notes">
+                <label class="cfg-label">Risk notes</label>
+                <div class="sc-list" data-sc-list="implementation_result.risk_notes"></div>
+              </div>
+              <div class="cfg-field" data-sc-field="implementation_result.claimed_changed_files">
+                <label class="cfg-label">Claimed changed files</label>
+                <div class="sc-list" data-sc-list="implementation_result.claimed_changed_files"></div>
+              </div>
+            </section>
+
+            <section class="cfg-group">
+              <h3>E2E result</h3>
+              <p class="muted cfg-section-blurb">
+                What the replay E2E reports back. Flip the status to
+                <code>failed</code> to exercise the triage path.
+              </p>
+              <div class="cfg-field" data-sc-field="e2e_result.status">
+                <label class="cfg-label" for="scf-e2e-status">Status</label>
+                <select id="scf-e2e-status">
+                  <option value="passed">passed (loop exits clean)</option>
+                  <option value="failed">failed (triggers triage)</option>
+                </select>
+              </div>
+              <div class="cfg-field" data-sc-field="e2e_result.test_suite">
+                <label class="cfg-label" for="scf-e2e-suite">Test suite</label>
+                <input id="scf-e2e-suite" type="text"
+                  placeholder="e.g. gpu-streaming-e2e">
+              </div>
+              <div class="cfg-field" data-sc-field="e2e_result.duration_seconds">
+                <label class="cfg-label" for="scf-e2e-duration">Duration (seconds)</label>
+                <input id="scf-e2e-duration" type="number" min="0" step="1">
+              </div>
+              <div class="cfg-field hidden" id="scf-first-error-wrap"
+                data-sc-field="e2e_result.first_error">
+                <label class="cfg-label" for="scf-e2e-first-error">First error</label>
+                <input id="scf-e2e-first-error" type="text"
+                  placeholder="The error message the agent sees first.">
+                <div class="cfg-help">Shown to the triage step on failure.</div>
+              </div>
+            </section>
+
+            <section class="cfg-group">
+              <h3>Other files</h3>
+              <p class="muted cfg-section-blurb">
+                Scenario-specific fixtures and extras. Edit in raw mode.
+              </p>
+              <ul id="sc-other-files" class="sc-other-files muted"></ul>
+            </section>
+          </form>
+
+          <!-- Raw files pane (toggle) ---------------------------------- -->
+          <div id="sc-raw-pane" class="hidden">
+            <div class="row">
+              <select id="sc-file-select" aria-label="Select a file"></select>
+              <button id="sc-save-raw">Save file</button>
+              <span id="sc-raw-status" class="muted"></span>
+            </div>
+            <textarea id="sc-textarea" rows="18" spellcheck="false"></textarea>
+          </div>
+
+          <!-- Validation issues -->
+          <div id="sc-issues" class="cfg-issues hidden"></div>
+
+          <!-- Actions -->
+          <div class="row cfg-actions" id="sc-form-actions">
+            <button id="sc-save">Save scenario</button>
+            <button id="sc-revert" class="secondary">Revert</button>
+            <span id="sc-status" class="muted"></span>
+          </div>
         </div>
 
         <div class="panel hidden" id="builder-share">

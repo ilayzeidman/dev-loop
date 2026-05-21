@@ -18,6 +18,7 @@ Read endpoints
   GET  /api/scenarios                    list of scenarios
   GET  /api/scenarios/<name>             scenario file list + previews
   GET  /api/scenarios/<name>/file/<fn>   raw scenario file
+  GET  /api/scenarios/<name>/form        structured projection of a scenario
   GET  /api/capabilities                 capability specs
   GET  /api/playbooks                    list of playbooks
   GET  /api/playbooks/<name>             raw playbook
@@ -34,6 +35,8 @@ Write endpoints
   POST /api/playbooks/<name>             write playbook (repo-local override)
   POST /api/scenarios/<name>/file/<fn>   write scenario file
   POST /api/scenarios                    create new scenario dir
+  POST /api/scenarios/<name>/form        save structured form (writes 4 files)
+  POST /api/scenarios/<name>/validate    dry-run a structured form (no write)
   POST /api/implement                    launch loop in background
   POST /api/bundle/preview               dry-run a bundle against this repo
   POST /api/bundle/import                apply a bundle to this repo
@@ -74,6 +77,14 @@ from ..config import (
 )
 from ..playbooks import PLAYBOOK_DIR
 from ..schemas import SCHEMA_DIR
+from ..scenarios import (
+    default_e2e_result,
+    default_implementation_result,
+    default_task_contract,
+    dump_scenario_files,
+    load_scenario_form,
+    validate_scenario_form,
+)
 from ..util import read_json
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -272,7 +283,15 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                     unquote(p[len("/api/playbooks/"):]),
                     self._read_body().decode("utf-8")); return
             if p.startswith("/api/scenarios/"):
-                self._api_scenario_file_post(p[len("/api/scenarios/"):],
+                sub = p[len("/api/scenarios/"):]
+                parts = sub.split("/", 2)
+                if len(parts) == 2 and parts[1] == "form":
+                    self._api_scenario_form_post(parts[0], self._read_json_body())
+                    return
+                if len(parts) == 2 and parts[1] == "validate":
+                    self._api_scenario_form_validate(parts[0], self._read_json_body())
+                    return
+                self._api_scenario_file_post(sub,
                                              self._read_body().decode("utf-8"))
                 return
             self._send_text(404, "not found")
@@ -716,6 +735,16 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                     elif f.is_dir():
                         files.append({"name": f.name + "/", "size": None})
                 self._send_json(200, {"name": name, "path": str(d), "files": files}); return
+            if parts[1] == "form" and len(parts) == 2:
+                form = load_scenario_form(d)
+                issues = [i.to_dict() for i in validate_scenario_form(form.to_dict())]
+                self._send_json(200, {
+                    "form": form.to_dict(),
+                    "path": str(d),
+                    "issues": issues,
+                    "ok": not any(i["level"] == "error" for i in issues),
+                })
+                return
             if parts[1] == "file" and len(parts) == 3:
                 f = (d / parts[2]).resolve()
                 if not _is_within(f, sc_dir):
@@ -762,26 +791,83 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 self._send_text(403, "forbidden"); return
             if d.exists():
                 self._send_json(400, {"error": "already exists"}); return
+            # Build the initial form from anything the caller passed and
+            # let ``dump_scenario_files`` write the canonical files. This
+            # keeps "create" and "save" on the same code path.
+            request = body.get("task_request") or f"# {name}\n\nDescribe the request here.\n"
+            goal = (body.get("implementation_goal") or "").strip()
+            if not goal:
+                goal = request.strip().splitlines()[0].lstrip("# ").strip() or name
+            tc = default_task_contract()
+            tc["implementation_goal"] = goal
+            form = {
+                "task_request": request,
+                "task_contract": tc,
+                "implementation_result": default_implementation_result(),
+                "e2e_result": default_e2e_result(),
+                "extras": {},
+            }
             d.mkdir(parents=True)
-            (d / "task_request.md").write_text(
-                body.get("task_request", f"# {name}\n\nDescribe the request here.\n"),
-                encoding="utf-8")
-            (d / "task_contract.json").write_text(json.dumps({
-                "type": "task_contract",
-                "implementation_goal": body.get("task_request", "").strip() or name,
-                "assumptions": [],
-                "success_criteria": ["E2E passes"],
-                "non_goals": [],
-                "likely_components": [],
-                "validation_plan": [],
-                "ambiguities": [],
-                "can_start_without_human": True,
-            }, indent=2) + "\n", encoding="utf-8")
-            (d / "e2e_result.json").write_text(json.dumps({
-                "status": "passed",
-                "test_suite": "stub-e2e",
-            }, indent=2) + "\n", encoding="utf-8")
+            for fname, text in dump_scenario_files(form).items():
+                (d / fname).write_text(text, encoding="utf-8")
             self._send_json(200, {"ok": True, "name": name, "path": str(d)})
+
+        def _api_scenario_form_post(self, name: str, body: Any) -> None:
+            """Save a structured scenario form.
+
+            Validates, then writes the four projected files atomically
+            (via a temp-and-replace dance per file). Extras are merged
+            back in by ``dump_scenario_files`` so power-user fields are
+            preserved.
+            """
+            if not _valid_scenario_name(name):
+                self._send_json(400, {"error": "invalid scenario name"}); return
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "body must be a JSON object"}); return
+            form = body.get("form")
+            if not isinstance(form, dict):
+                self._send_json(400, {"error": "missing 'form' object"}); return
+            _, r = _resolved()
+            sc_dir = r.scenarios_dir
+            d = sc_dir / name
+            if not _is_within(d, sc_dir):
+                self._send_text(403, "forbidden"); return
+            if not d.exists() or not d.is_dir():
+                self._send_json(404, {"error": "scenario not found"}); return
+            issues = [i.to_dict() for i in validate_scenario_form(form)]
+            errors = [i for i in issues if i["level"] == "error"]
+            if errors:
+                self._send_json(400, {
+                    "ok": False, "issues": issues, "error": "validation failed",
+                })
+                return
+            files = dump_scenario_files(form)
+            for fname, text in files.items():
+                _atomic_write_text(d / fname, text)
+            # Echo back a fresh form so the client picks up any
+            # normalization (defaults filled in, etc.).
+            fresh = load_scenario_form(d)
+            self._send_json(200, {
+                "ok": True,
+                "issues": issues,
+                "written": sorted(files.keys()),
+                "form": fresh.to_dict(),
+            })
+
+        def _api_scenario_form_validate(self, name: str, body: Any) -> None:
+            """Dry-run validation for the form. Never writes."""
+            if not _valid_scenario_name(name):
+                self._send_json(400, {"error": "invalid scenario name"}); return
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "body must be a JSON object"}); return
+            form = body.get("form")
+            if not isinstance(form, dict):
+                self._send_json(400, {"error": "missing 'form' object"}); return
+            issues = [i.to_dict() for i in validate_scenario_form(form)]
+            self._send_json(200, {
+                "ok": not any(i["level"] == "error" for i in issues),
+                "issues": issues,
+            })
 
         # ----- capabilities, playbooks, schemas -----------------------
 
@@ -920,6 +1006,21 @@ def _valid_scenario_name(name: str) -> bool:
         if bad in name:
             return False
     return True
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` via temp-and-replace.
+
+    Per-file atomicity matters for the scenario form save: a four-file
+    write that's interrupted half-way should leave each file either
+    fully written (new bytes) or fully untouched (old bytes), never
+    truncated. ``os.replace`` is atomic on POSIX and Windows.
+    """
+    import os
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _is_within(p: Path, root: Path) -> bool:

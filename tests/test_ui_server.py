@@ -621,3 +621,206 @@ def test_scenario_create_blocks_dotdot_name(tmp_path: Path):
             raise AssertionError("expected HTTPError")
         except urllib.error.HTTPError as e:
             assert e.code == 400, e.code
+
+
+# ---------------------------------------------------------------------------
+# Build > Scenarios (structured form) endpoints
+
+
+def _create_scenario(port: int, name: str = "demo-001", goal: str = "do the thing") -> dict:
+    status, body = _post_json(port, "/api/scenarios", {
+        "name": name,
+        "implementation_goal": goal,
+        "task_request": f"# {name}\n\n{goal}\n",
+    })
+    assert status == 200
+    return body
+
+
+def test_scenario_form_get_returns_default_shape(tmp_path: Path):
+    """After create, GET /api/scenarios/<name>/form returns a fillable form."""
+    with _server(tmp_path) as (port, _):
+        _create_scenario(port)
+        status, body = _get(port, "/api/scenarios/demo-001/form")
+        assert status == 200
+        data = json.loads(body)
+        form = data["form"]
+        assert form["name"] == "demo-001"
+        assert form["task_contract"]["implementation_goal"] == "do the thing"
+        assert form["e2e_result"]["status"] == "passed"
+        assert form["implementation_result"]["confidence"] == "medium"
+        # No errors against a clean default form.
+        errs = [i for i in data["issues"] if i["level"] == "error"]
+        assert errs == [], data["issues"]
+
+
+def test_scenario_form_post_writes_canonical_files(tmp_path: Path):
+    """POST /api/scenarios/<name>/form rewrites the four projected files."""
+    with _server(tmp_path) as (port, _):
+        _create_scenario(port)
+        # Pull the form, change a field, save it back.
+        _, body = _get(port, "/api/scenarios/demo-001/form")
+        form = json.loads(body)["form"]
+        form["task_contract"]["success_criteria"] = ["A", "B"]
+        form["e2e_result"]["status"] = "failed"
+        form["e2e_result"]["first_error"] = "boom"
+        status, resp = _post_json(port, "/api/scenarios/demo-001/form", {
+            "form": form,
+        })
+        assert status == 200
+        assert resp["ok"] is True
+        assert set(resp["written"]) == {
+            "task_request.md", "task_contract.json",
+            "implementation_result.json", "e2e_result.json",
+        }
+        # The files on disk match.
+        scen_dir = tmp_path / "scenarios" / "demo-001"
+        tc = json.loads((scen_dir / "task_contract.json").read_text())
+        er = json.loads((scen_dir / "e2e_result.json").read_text())
+        assert tc["success_criteria"] == ["A", "B"]
+        assert er["status"] == "failed"
+        assert er["first_error"] == "boom"
+
+
+def test_scenario_form_post_rejects_validation_errors(tmp_path: Path):
+    """Errors -> 400 with per-field issues; nothing is written."""
+    import urllib.error
+    with _server(tmp_path) as (port, _):
+        _create_scenario(port)
+        scen_dir = tmp_path / "scenarios" / "demo-001"
+        before = (scen_dir / "task_contract.json").read_text()
+        bad = {
+            "task_request": "x",
+            "task_contract": {
+                "implementation_goal": "",  # required, empty -> error
+                "success_criteria": [], "assumptions": [], "non_goals": [],
+                "likely_components": [], "validation_plan": [],
+                "ambiguities": [], "can_start_without_human": True,
+            },
+            "implementation_result": {
+                "summary": "x", "hypothesis": "x", "confidence": "medium",
+                "expected_validation": [], "risk_notes": [],
+                "claimed_changed_files": [],
+            },
+            "e2e_result": {"status": "passed", "test_suite": "x", "duration_seconds": 1},
+            "extras": {},
+        }
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/scenarios/demo-001/form",
+            method="POST",
+            data=json.dumps({"form": bad}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=2)
+            raise AssertionError("expected HTTPError")
+        except urllib.error.HTTPError as e:
+            assert e.code == 400
+            body = json.loads(e.read().decode("utf-8"))
+            assert body["ok"] is False
+            fields = {i["field"] for i in body["issues"]}
+            assert "task_contract.implementation_goal" in fields
+        # File on disk is unchanged.
+        after = (scen_dir / "task_contract.json").read_text()
+        assert before == after
+
+
+def test_scenario_form_validate_never_writes(tmp_path: Path):
+    """The /validate endpoint reports issues but doesn't touch disk."""
+    with _server(tmp_path) as (port, _):
+        _create_scenario(port)
+        scen_dir = tmp_path / "scenarios" / "demo-001"
+        before = (scen_dir / "task_contract.json").read_text()
+        bad_form = {
+            "task_contract": {"implementation_goal": ""},
+            "implementation_result": {"summary": "x", "confidence": "medium"},
+            "e2e_result": {"status": "passed", "test_suite": "x",
+                           "duration_seconds": 1},
+        }
+        status, resp = _post_json(port,
+            "/api/scenarios/demo-001/validate", {"form": bad_form})
+        assert status == 200
+        assert resp["ok"] is False
+        assert any(i["field"] == "task_contract.implementation_goal"
+                   for i in resp["issues"])
+        after = (scen_dir / "task_contract.json").read_text()
+        assert before == after
+
+
+def test_scenario_form_post_preserves_extras(tmp_path: Path):
+    """Power-user fields outside the projected schema round-trip through save."""
+    with _server(tmp_path) as (port, _):
+        _create_scenario(port)
+        # Hand-edit a field the form doesn't know about.
+        scen_dir = tmp_path / "scenarios" / "demo-001"
+        tc = json.loads((scen_dir / "task_contract.json").read_text())
+        tc["custom_priority"] = "p1"
+        (scen_dir / "task_contract.json").write_text(json.dumps(tc, indent=2))
+        # Pull the form, edit a known field, save it back.
+        _, body = _get(port, "/api/scenarios/demo-001/form")
+        form = json.loads(body)["form"]
+        assert form["extras"]["task_contract"]["custom_priority"] == "p1"
+        form["task_contract"]["success_criteria"] = ["new criterion"]
+        status, _ = _post_json(port, "/api/scenarios/demo-001/form", {"form": form})
+        assert status == 200
+        # The custom field is still there.
+        tc2 = json.loads((scen_dir / "task_contract.json").read_text())
+        assert tc2["custom_priority"] == "p1"
+        assert tc2["success_criteria"] == ["new criterion"]
+
+
+def test_scenario_form_post_unknown_scenario_404(tmp_path: Path):
+    """Saving against a name that doesn't exist returns 404, not a crash."""
+    import urllib.error
+    with _server(tmp_path) as (port, _):
+        (tmp_path / "scenarios").mkdir()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/scenarios/nope/form",
+            method="POST",
+            data=json.dumps({"form": {
+                "task_contract": {"implementation_goal": "x"},
+                "implementation_result": {"summary": "x", "confidence": "medium"},
+                "e2e_result": {"status": "passed", "test_suite": "x",
+                               "duration_seconds": 1},
+            }}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=2)
+            raise AssertionError("expected HTTPError")
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
+
+
+def test_scenario_form_post_blocks_traversal_in_name(tmp_path: Path):
+    """A traversal-y name in the form POST URL is rejected outright."""
+    import urllib.error
+    with _server(tmp_path) as (port, _):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/scenarios/..%2Fevil/form",
+            method="POST",
+            data=json.dumps({"form": {}}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=2)
+            raise AssertionError("expected HTTPError")
+        except urllib.error.HTTPError as e:
+            assert e.code in (400, 403, 404)
+
+
+def test_scenario_create_writes_implementation_result_too(tmp_path: Path):
+    """Newly-created scenarios are immediately runnable — all four
+    projected files are present so the replay agent has no fallbacks
+    to lean on."""
+    with _server(tmp_path) as (port, _):
+        _create_scenario(port, name="created-001", goal="my goal")
+        d = tmp_path / "scenarios" / "created-001"
+        for f in ("task_request.md", "task_contract.json",
+                  "implementation_result.json", "e2e_result.json"):
+            assert (d / f).exists(), f"{f} should be written on create"
+        ir = json.loads((d / "implementation_result.json").read_text())
+        assert ir["type"] == "implementation_result"
+        assert ir["confidence"] in ("low", "medium", "high")
+        tc = json.loads((d / "task_contract.json").read_text())
+        assert tc["implementation_goal"] == "my goal"

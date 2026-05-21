@@ -492,57 +492,448 @@ async function loadSchema(name) {
 }
 $("#sch-select").addEventListener("change", e => loadSchema(e.target.value));
 
+// ----- Build > Scenarios (structured form) ------------------------------
+
+// Schema-light: the form mirrors ``harness.scenarios.ScenarioForm``. We
+// hold the loaded form plus its on-load snapshot so Revert and the
+// "dirty" pill can both work without re-fetching.
+let SC_CURRENT = null;      // {name, task_request, task_contract, ..., extras, other_files}
+let SC_LOADED_JSON = null;  // stringified snapshot for dirty comparison
+let SC_VALIDATE_TIMER = null;
+let SC_NAME = null;
+const SC_LIST_FIELDS = [
+  "task_contract.success_criteria",
+  "task_contract.assumptions",
+  "task_contract.non_goals",
+  "task_contract.likely_components",
+  "task_contract.validation_plan",
+  "task_contract.ambiguities",
+  "implementation_result.expected_validation",
+  "implementation_result.risk_notes",
+  "implementation_result.claimed_changed_files",
+];
+
 async function refreshBuildScenarios() {
-  const {scenarios} = await getJSON("/api/scenarios");
+  const data = await getJSON("/api/scenarios");
+  const scenarios = data.scenarios || [];
+  const scenariosDir = data.scenarios_dir || "scenarios/";
+  $("#sc-new-name-hint").textContent = scenariosDir + "/";
   const sel = $("#sc-select");
-  sel.innerHTML = scenarios.map(s => `<option value="${s.name}">${s.name}</option>`).join("");
-  if (scenarios.length) await loadScenario(scenarios[0].name);
-}
-async function loadScenario(name) {
-  const data = await getJSON("/api/scenarios/" + encodeURIComponent(name));
-  const detail = $("#sc-detail");
-  detail.innerHTML = `
-    <p class="muted">${data.path}</p>
-    <h3>Files</h3>
-    <ul id="sc-files"></ul>
-    <h3>Edit</h3>
-    <div class="row">
-      <select id="sc-file-select">${data.files.filter(f => !f.name.endsWith("/"))
-        .map(f => `<option>${f.name}</option>`).join("")}</select>
-      <button id="sc-save">Save</button>
-      <span id="sc-status"></span>
-    </div>
-    <textarea id="sc-textarea" rows="14" spellcheck="false"></textarea>`;
-  $("#sc-files").innerHTML = data.files.map(f =>
-    `<li><code>${f.name}</code> <span class="muted">${f.size != null ? f.size + " B" : ""}</span></li>`
+  sel.innerHTML = scenarios.map(
+    s => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}</option>`,
   ).join("");
-  async function loadFile(fn) {
-    $("#sc-textarea").value = await getText(
-      `/api/scenarios/${encodeURIComponent(name)}/file/${encodeURIComponent(fn)}`);
+  const empty = scenarios.length === 0;
+  $("#sc-empty").classList.toggle("hidden", !empty);
+  $("#sc-mode-tabs").classList.toggle("hidden", empty);
+  $("#sc-form").classList.toggle("hidden", empty);
+  $("#sc-form-actions").classList.toggle("hidden", empty);
+  $("#sc-raw-pane").classList.add("hidden");
+  $("#sc-run").disabled = empty;
+  if (empty) {
+    $("#sc-path").textContent = "";
+    $("#sc-issues").classList.add("hidden");
+    return;
   }
-  $("#sc-file-select").addEventListener("change", e => loadFile(e.target.value));
-  if (data.files.length) await loadFile(data.files.find(f => !f.name.endsWith("/")).name);
-  $("#sc-save").addEventListener("click", async () => {
-    const fn = $("#sc-file-select").value;
-    $("#sc-status").textContent = "saving…";
-    try {
-      await postText(
-        `/api/scenarios/${encodeURIComponent(name)}/file/${encodeURIComponent(fn)}`,
-        $("#sc-textarea").value);
-      $("#sc-status").textContent = "saved ✓";
-    } catch (e) { $("#sc-status").textContent = "error: " + e; }
+  const want = SC_NAME && scenarios.some(s => s.name === SC_NAME)
+    ? SC_NAME : scenarios[0].name;
+  sel.value = want;
+  await loadScenario(want);
+}
+
+async function loadScenario(name) {
+  SC_NAME = name;
+  const data = await getJSON(
+    "/api/scenarios/" + encodeURIComponent(name) + "/form");
+  SC_CURRENT = data.form;
+  SC_LOADED_JSON = JSON.stringify(SC_CURRENT);
+  $("#sc-path").textContent = data.path;
+  populateScenarioForm(SC_CURRENT);
+  renderScenarioIssues(data.issues || []);
+  setScDirty(false);
+  $("#sc-status").textContent = "";
+  // Default to form view on every load so a switch between scenarios
+  // doesn't strand the user in raw-files mode.
+  showScMode("form");
+}
+
+function populateScenarioForm(form) {
+  $("#scf-task_request").value = form.task_request || "";
+  const tc = form.task_contract || {};
+  $("#scf-goal").value = tc.implementation_goal || "";
+  $("#scf-can_start_without_human").checked = tc.can_start_without_human !== false;
+  const ir = form.implementation_result || {};
+  $("#scf-summary").value = ir.summary || "";
+  $("#scf-hypothesis").value = ir.hypothesis || "";
+  $("#scf-confidence").value = ir.confidence || "medium";
+  const er = form.e2e_result || {};
+  $("#scf-e2e-status").value = er.status || "passed";
+  $("#scf-e2e-suite").value = er.test_suite || "";
+  $("#scf-e2e-duration").value = er.duration_seconds == null ? 1 : er.duration_seconds;
+  $("#scf-e2e-first-error").value = er.first_error || "";
+  toggleScFirstError(er.status === "failed");
+
+  for (const path of SC_LIST_FIELDS) {
+    const items = readScPath(form, path) || [];
+    renderScList(path, items);
+  }
+
+  const ul = $("#sc-other-files");
+  const others = form.other_files || [];
+  if (!others.length) {
+    ul.innerHTML = `<li class="sc-other-empty">No extra files.</li>`;
+  } else {
+    ul.innerHTML = others.map(
+      f => `<li><code>${escapeHtml(f)}</code></li>`,
+    ).join("");
+  }
+}
+
+function readScPath(obj, dotted) {
+  const parts = dotted.split(".");
+  let cur = obj;
+  for (const p of parts) {
+    if (cur == null) return undefined;
+    cur = cur[p];
+  }
+  return cur;
+}
+
+function writeScPath(obj, dotted, value) {
+  const parts = dotted.split(".");
+  let cur = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (cur[parts[i]] == null || typeof cur[parts[i]] !== "object") {
+      cur[parts[i]] = {};
+    }
+    cur = cur[parts[i]];
+  }
+  cur[parts[parts.length - 1]] = value;
+}
+
+function renderScList(path, items) {
+  const host = document.querySelector(`.sc-list[data-sc-list="${path}"]`);
+  if (!host) return;
+  host.innerHTML = "";
+  items.forEach((val, idx) => host.appendChild(makeScListRow(path, val, idx)));
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "sc-list-empty";
+    empty.textContent = "(empty)";
+    host.appendChild(empty);
+  }
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "sc-list-add";
+  add.textContent = "+ add";
+  add.addEventListener("click", () => {
+    const cur = readScPath(SC_CURRENT, path) || [];
+    cur.push("");
+    writeScPath(SC_CURRENT, path, cur);
+    renderScList(path, cur);
+    // Focus the brand-new input so the user can just start typing.
+    const inputs = host.querySelectorAll('input[type="text"]');
+    if (inputs.length) inputs[inputs.length - 1].focus();
+    setScDirty(true);
+    scheduleScValidate();
+  });
+  host.appendChild(add);
+}
+
+function makeScListRow(path, value, index) {
+  const row = document.createElement("div");
+  row.className = "sc-list-row";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.value = value;
+  input.addEventListener("input", e => {
+    const cur = readScPath(SC_CURRENT, path) || [];
+    cur[index] = e.target.value;
+    writeScPath(SC_CURRENT, path, cur);
+    setScDirty(true);
+    scheduleScValidate();
+  });
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "sc-list-del";
+  del.title = "remove";
+  del.setAttribute("aria-label", "remove this item");
+  del.textContent = "×";
+  del.addEventListener("click", () => {
+    const cur = readScPath(SC_CURRENT, path) || [];
+    cur.splice(index, 1);
+    writeScPath(SC_CURRENT, path, cur);
+    renderScList(path, cur);
+    setScDirty(true);
+    scheduleScValidate();
+  });
+  row.appendChild(input);
+  row.appendChild(del);
+  return row;
+}
+
+function toggleScFirstError(show) {
+  $("#scf-first-error-wrap").classList.toggle("hidden", !show);
+}
+
+function bindScScalar(id, path, isCheckbox = false) {
+  const el = $("#" + id);
+  if (!el) return;
+  el.addEventListener("input", () => {
+    const val = isCheckbox ? el.checked : el.value;
+    writeScPath(SC_CURRENT, path, val);
+    setScDirty(true);
+    scheduleScValidate();
   });
 }
-$("#sc-select").addEventListener("change", e => loadScenario(e.target.value));
-$("#sc-new").addEventListener("click", async () => {
-  const name = prompt("Scenario name (slug, e.g. encoder-oom-001):");
-  if (!name) return;
-  const req = prompt("One-paragraph task request:", "Describe the request.");
-  if (req == null) return;
-  await postJSON("/api/scenarios", {name, task_request: req});
-  await refreshBuildScenarios();
-  $("#sc-select").value = name;
-  loadScenario(name);
+
+function bindScNumber(id, path) {
+  const el = $("#" + id);
+  if (!el) return;
+  el.addEventListener("input", () => {
+    const raw = el.value;
+    const n = raw === "" ? null : Number(raw);
+    writeScPath(SC_CURRENT, path,
+      n == null || Number.isNaN(n) ? raw : Math.trunc(n));
+    setScDirty(true);
+    scheduleScValidate();
+  });
+}
+
+bindScScalar("scf-task_request", "task_request");
+bindScScalar("scf-goal", "task_contract.implementation_goal");
+bindScScalar("scf-can_start_without_human", "task_contract.can_start_without_human", true);
+bindScScalar("scf-summary", "implementation_result.summary");
+bindScScalar("scf-hypothesis", "implementation_result.hypothesis");
+bindScScalar("scf-confidence", "implementation_result.confidence");
+bindScScalar("scf-e2e-suite", "e2e_result.test_suite");
+bindScNumber("scf-e2e-duration", "e2e_result.duration_seconds");
+bindScScalar("scf-e2e-first-error", "e2e_result.first_error");
+
+$("#scf-e2e-status").addEventListener("change", () => {
+  const v = $("#scf-e2e-status").value;
+  writeScPath(SC_CURRENT, "e2e_result.status", v);
+  toggleScFirstError(v === "failed");
+  setScDirty(true);
+  scheduleScValidate();
+});
+
+function setScDirty(dirty) {
+  const pill = $("#sc-dirty-pill");
+  pill.classList.toggle("dirty", dirty);
+  pill.textContent = dirty ? "● unsaved changes" : "";
+}
+
+function scheduleScValidate() {
+  if (SC_VALIDATE_TIMER) clearTimeout(SC_VALIDATE_TIMER);
+  SC_VALIDATE_TIMER = setTimeout(validateScNow, 250);
+}
+
+async function validateScNow() {
+  if (!SC_NAME || !SC_CURRENT) return;
+  try {
+    const r = await postJSON(
+      `/api/scenarios/${encodeURIComponent(SC_NAME)}/validate`,
+      {form: SC_CURRENT});
+    renderScenarioIssues(r.issues || []);
+    $("#sc-save").disabled = !r.ok;
+  } catch (e) {
+    // Network / 5xx: don't block save, just let the user try and find out.
+    $("#sc-save").disabled = false;
+  }
+}
+
+function renderScenarioIssues(issues) {
+  const box = $("#sc-issues");
+  $$(".cfg-field", $("#sc-form")).forEach(
+    f => f.classList.remove("error", "warn"));
+  if (!issues.length) {
+    box.classList.add("hidden"); box.innerHTML = "";
+    return;
+  }
+  // Light up each offending field on the form.
+  for (const i of issues) {
+    const f = document.querySelector(
+      `.cfg-field[data-sc-field="${i.field}"]`);
+    if (f) f.classList.add(i.level === "error" ? "error" : "warn");
+  }
+  const errs = issues.filter(i => i.level === "error").length;
+  const warns = issues.filter(i => i.level === "warning").length;
+  const head = errs
+    ? `<strong>${errs} error${errs !== 1 ? "s" : ""}</strong>` +
+      (warns ? ` and ${warns} warning${warns !== 1 ? "s" : ""}` : "")
+    : `<strong>${warns} warning${warns !== 1 ? "s" : ""}</strong>`;
+  box.innerHTML =
+    `<div>${head}</div>` +
+    `<ul class="cfg-issues-list">${
+      issues.map(i => {
+        const cls = i.level === "error" ? "cfg-issue-error" : "cfg-issue-warn";
+        const mark = i.level === "error" ? "✖" : "⚠";
+        const field = i.field && !i.field.startsWith("_")
+          ? `<code class="cfg-issue-field">${escapeHtml(i.field)}</code>` : "";
+        return `<li class="cfg-issue ${cls}"><span class="cfg-issue-mark">${mark}</span>${field}<span>${escapeHtml(i.message)}</span></li>`;
+      }).join("")
+    }</ul>`;
+  box.classList.remove("hidden");
+}
+
+// ---- mode toggle (form vs raw files) ------------------------------------
+function showScMode(mode) {
+  $$("#sc-mode-tabs button").forEach(
+    b => b.classList.toggle("active", b.dataset.scMode === mode));
+  $("#sc-form").classList.toggle("hidden", mode !== "form");
+  $("#sc-form-actions").classList.toggle("hidden", mode !== "form");
+  $("#sc-issues").classList.toggle("hidden",
+    mode !== "form" || !$("#sc-issues").innerHTML);
+  $("#sc-raw-pane").classList.toggle("hidden", mode !== "raw");
+  if (mode === "raw") populateScRawFiles();
+}
+$$("#sc-mode-tabs button").forEach(
+  b => b.addEventListener("click", () => showScMode(b.dataset.scMode)));
+
+async function populateScRawFiles() {
+  if (!SC_NAME) return;
+  const data = await getJSON("/api/scenarios/" + encodeURIComponent(SC_NAME));
+  const files = data.files.filter(f => !f.name.endsWith("/"));
+  const sel = $("#sc-file-select");
+  const prev = sel.value;
+  sel.innerHTML = files.map(
+    f => `<option>${escapeHtml(f.name)}</option>`).join("");
+  const pick = files.find(f => f.name === prev)
+    ? prev
+    : (files[0] && files[0].name);
+  if (pick) {
+    sel.value = pick;
+    await loadScRawFile(pick);
+  }
+}
+async function loadScRawFile(fn) {
+  $("#sc-textarea").value = await getText(
+    `/api/scenarios/${encodeURIComponent(SC_NAME)}/file/${encodeURIComponent(fn)}`);
+  $("#sc-raw-status").textContent = "";
+}
+$("#sc-file-select").addEventListener("change", e => loadScRawFile(e.target.value));
+$("#sc-save-raw").addEventListener("click", async () => {
+  const fn = $("#sc-file-select").value;
+  $("#sc-raw-status").textContent = "saving…";
+  try {
+    await postText(
+      `/api/scenarios/${encodeURIComponent(SC_NAME)}/file/${encodeURIComponent(fn)}`,
+      $("#sc-textarea").value);
+    $("#sc-raw-status").textContent = "saved ✓";
+    toast(`saved ${fn}`);
+    // Re-pull the structured projection so the form picks up any
+    // hand-edits when the user flips back.
+    if (SC_NAME) await loadScenario(SC_NAME);
+  } catch (e) { $("#sc-raw-status").textContent = "error: " + e; }
+});
+
+// ---- save / revert ------------------------------------------------------
+$("#sc-save").addEventListener("click", async () => {
+  if (!SC_NAME || !SC_CURRENT) return;
+  $("#sc-status").textContent = "saving…";
+  try {
+    const r = await postJSON(
+      `/api/scenarios/${encodeURIComponent(SC_NAME)}/form`,
+      {form: SC_CURRENT});
+    SC_CURRENT = r.form;
+    SC_LOADED_JSON = JSON.stringify(SC_CURRENT);
+    populateScenarioForm(SC_CURRENT);
+    renderScenarioIssues(r.issues || []);
+    setScDirty(false);
+    $("#sc-status").textContent = `saved ${(r.written || []).length} file(s) ✓`;
+    toast(`saved scenario ${SC_NAME}`);
+  } catch (e) {
+    // The server returns 400 with a JSON body on validation failure.
+    $("#sc-status").textContent = "error: " + e;
+  }
+});
+
+$("#sc-revert").addEventListener("click", () => {
+  if (!SC_LOADED_JSON) return;
+  SC_CURRENT = JSON.parse(SC_LOADED_JSON);
+  populateScenarioForm(SC_CURRENT);
+  setScDirty(false);
+  $("#sc-status").textContent = "reverted";
+  scheduleScValidate();
+});
+
+$("#sc-select").addEventListener("change", async e => {
+  if (await confirmScDiscard()) loadScenario(e.target.value);
+  else $("#sc-select").value = SC_NAME;
+});
+
+async function confirmScDiscard() {
+  const pill = $("#sc-dirty-pill");
+  if (!pill.classList.contains("dirty")) return true;
+  return confirm("Discard unsaved changes to " + SC_NAME + "?");
+}
+
+// ---- new-scenario form (no prompt() dialogs) ---------------------------
+$("#sc-new-toggle").addEventListener("click", () => {
+  const f = $("#sc-new-form");
+  const hidden = f.classList.toggle("hidden");
+  if (!hidden) {
+    $("#sc-new-name").focus();
+    $("#sc-new-status").textContent = "";
+  }
+});
+$("#sc-new-cancel").addEventListener("click", () => {
+  $("#sc-new-form").classList.add("hidden");
+  $("#sc-new-name").value = "";
+  $("#sc-new-goal").value = "";
+});
+$("#sc-new-create").addEventListener("click", async () => {
+  const name = $("#sc-new-name").value.trim();
+  const goal = $("#sc-new-goal").value.trim();
+  const status = $("#sc-new-status");
+  if (!/^[A-Za-z0-9_.\-]+$/.test(name)) {
+    status.textContent = "name must be letters/digits/-_.";
+    return;
+  }
+  status.textContent = "creating…";
+  try {
+    await postJSON("/api/scenarios", {
+      name,
+      task_request: goal
+        ? `# ${name}\n\n${goal}\n`
+        : `# ${name}\n\nDescribe the request here.\n`,
+      implementation_goal: goal || name,
+    });
+    SC_NAME = name;
+    $("#sc-new-form").classList.add("hidden");
+    $("#sc-new-name").value = "";
+    $("#sc-new-goal").value = "";
+    status.textContent = "";
+    await refreshBuildScenarios();
+    toast(`created scenario ${name}`);
+  } catch (e) {
+    status.textContent = "error: " + e;
+  }
+});
+
+$("#sc-empty-overview-link").addEventListener("click", e => {
+  e.preventDefault();
+  selectBuilder("overview");
+});
+
+$("#sc-run").addEventListener("click", () => {
+  if (!SC_NAME) return;
+  showTab("run");
+  $("#impl-provider").value = "replay";
+  $("#impl-provider").dispatchEvent(new Event("change"));
+  // refreshScenariosForLaunch repopulates the select asynchronously;
+  // wait one tick so our value sticks.
+  setTimeout(() => {
+    const sel = $("#impl-scenario");
+    if (sel) {
+      sel.value = SC_NAME;
+      const goal = (SC_CURRENT && SC_CURRENT.task_contract
+        && SC_CURRENT.task_contract.implementation_goal) || "";
+      const req = $("#impl-request");
+      if (goal && !req.value.trim()) req.value = goal;
+    }
+    toast("ready to run — fill the request and hit Run /implement");
+  }, 150);
 });
 
 // ----- Share & reuse (config bundles) -----------------------------------
