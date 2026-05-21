@@ -785,3 +785,101 @@ def test_scenarios_validate_strict_promotes_warnings(tmp_path: Path, capsys):
     ])
     assert rc == 1
     assert d.exists()
+
+
+# capabilities ls/show -------------------------------------------------
+
+
+def test_capabilities_ls_renders_table_grouped_by_category(
+    tmp_path: Path, capsys,
+):
+    """`capabilities ls` is the CLI mirror of Build > Capabilities. The
+    table must show every built-in capability and group by category so a
+    user scanning for "what can the agent request" sees the
+    ``real_dev_agent_requestable`` block contiguous."""
+    rc = cli.main(["--repo", str(tmp_path), "capabilities", "ls"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "NAME" in out and "CATEGORY" in out and "AGENT" in out
+    assert "local_build" in out
+    assert "trigger_dev_jenkins_build" in out
+    assert "query_elastic_for_current_run" in out
+    lines = out.splitlines()
+    cat_idx = {
+        cat: next(i for i, ln in enumerate(lines) if cat in ln)
+        for cat in ("local_only", "real_dev_internal", "real_dev_agent_requestable")
+    }
+    sorted_cats = sorted(cat_idx, key=cat_idx.__getitem__)
+    assert sorted_cats == sorted(cat_idx)
+
+
+def test_capabilities_ls_filters_agent_requestable(tmp_path: Path, capsys):
+    rc = cli.main([
+        "--repo", str(tmp_path),
+        "capabilities", "ls", "--agent-requestable", "--json",
+    ])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    names = [c["name"] for c in payload["capabilities"]]
+    assert names
+    assert "trigger_dev_jenkins_build" not in names
+    assert "query_elastic_for_current_run" in names
+    assert all(c["agent_requestable"] for c in payload["capabilities"])
+
+
+def test_capabilities_ls_filters_by_category(tmp_path: Path, capsys):
+    rc = cli.main([
+        "--repo", str(tmp_path),
+        "capabilities", "ls", "--category", "local_only", "--json",
+    ])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    cats = {c["category"] for c in payload["capabilities"]}
+    assert cats == {"local_only"}
+
+
+def test_capabilities_show_text_includes_forced_params(tmp_path: Path, capsys):
+    rc = cli.main([
+        "--repo", str(tmp_path),
+        "capabilities", "show", "trigger_dev_jenkins_build",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "name:" in out and "trigger_dev_jenkins_build" in out
+    assert "category:" in out and "real_dev_internal" in out
+    assert "agent_requestable: no" in out
+    assert "forced_params:" in out
+    assert "environment" in out and "dev" in out
+
+
+def test_capabilities_show_json_payload(tmp_path: Path, capsys):
+    rc = cli.main([
+        "--repo", str(tmp_path),
+        "capabilities", "show", "query_elastic_for_current_run", "--json",
+    ])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["name"] == "query_elastic_for_current_run"
+    assert payload["agent_requestable"] is True
+    assert payload["uses_run_manifest"] is True
+    assert payload["has_impl"] is True
+
+
+def test_capabilities_show_missing_clean_error(tmp_path: Path, capsys):
+    rc = cli.main([
+        "--repo", str(tmp_path), "capabilities", "show", "nope",
+    ])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "not found" in err.lower()
+    assert "capabilities ls" in err
+
+
+def test_capabilities_does_not_require_repo_config(tmp_path: Path):
+    """`capabilities ls/show` introspects the global registry — it must
+    not require a per-repo `.dev-loop/config.yaml` to exist (this is the
+    one CLI surface that's repo-independent, since the registry ships
+    with the package)."""
+    assert not (tmp_path / ".dev-loop").exists()
+    rc = cli.main(["--repo", str(tmp_path), "capabilities", "ls"])
+    assert rc == 0

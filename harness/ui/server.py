@@ -991,21 +991,8 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
         # ----- capabilities, playbooks, schemas -----------------------
 
         def _api_list_capabilities(self) -> None:
-            from ..capabilities import load_default_registry
-            reg = load_default_registry()
-            specs = []
-            for name in reg.all_names():
-                s = reg.spec(name)
-                specs.append({
-                    "name": s.name,
-                    "category": s.category,
-                    "agent_requestable": s.agent_requestable,
-                    "timeout_seconds": s.timeout_seconds,
-                    "redacts_output": s.redacts_output,
-                    "audit": s.audit,
-                    "forced_params": s.forced_params,
-                })
-            self._send_json(200, {"capabilities": specs})
+            from ..capabilities import list_capabilities
+            self._send_json(200, {"capabilities": list_capabilities()})
 
         def _api_list_playbooks(self) -> None:
             override_dir = repo_playbook_dir(repo)

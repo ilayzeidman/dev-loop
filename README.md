@@ -151,6 +151,25 @@ the browser is clean in CI. The schema-equivalent checks live in
 allowed e2e statuses (`passed` / `failed`), non-negative
 `duration_seconds`, and the conventions `replay_runner` expects.
 
+## Inspecting the capability registry
+
+The agent's safety boundary is defined by `harness/capabilities/registry.yaml`.
+Headless callers can introspect it without dropping into the web UI:
+
+```bash
+dev-loop capabilities ls                          # whole table, grouped by category
+dev-loop capabilities ls --agent-requestable      # only what the agent can request
+dev-loop capabilities ls --category local_only    # filter by category
+dev-loop capabilities show trigger_dev_jenkins_build
+dev-loop capabilities show <name> --json          # machine-readable
+```
+
+The CLI and the Build > Capabilities UI tab share a single source of
+truth (`harness.capabilities.list_capabilities`), so a teammate
+reviewing the agent's allowed surface from either side sees identical
+data — including `has_impl`, which flags any spec declared in
+`registry.yaml` without a bound implementation.
+
 ## Provider model
 
 V1 supports three providers:

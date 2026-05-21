@@ -15,6 +15,8 @@ Subcommands:
   dev-loop scenarios ls                   # list replay scenarios (lint status)
   dev-loop scenarios show <name>          # detail view of one scenario
   dev-loop scenarios validate [name]      # lint one or all scenarios
+  dev-loop capabilities ls                # list capabilities in the registry
+  dev-loop capabilities show <name>       # detail view of one capability
   dev-loop bundle export [--out FILE]     # pack config+scenarios+playbooks
   dev-loop bundle import FILE [--apply]   # preview / apply a bundle
 """
@@ -37,7 +39,7 @@ from .bundle import (
     preview_apply,
     validate_bundle,
 )
-from .capabilities import load_default_registry
+from .capabilities import list_capabilities, load_default_registry, show_capability
 from .config import (
     CONFIG_DIR_NAME,
     CONFIG_FILE_NAME,
@@ -206,6 +208,37 @@ def main(argv: list[str] | None = None) -> int:
         help="emit machine-readable JSON instead of a human-readable report",
     )
 
+    p_caps = sub.add_parser(
+        "capabilities",
+        help="inspect the capability registry (ls / show) — same source of "
+             "truth as the Build > Capabilities UI tab",
+    )
+    caps_sub = p_caps.add_subparsers(dest="capabilities_cmd", required=True)
+    p_caps_ls = caps_sub.add_parser(
+        "ls", help="list every capability grouped by category",
+    )
+    p_caps_ls.add_argument(
+        "--category",
+        help="filter by category (local_only, real_dev_internal, "
+             "real_dev_agent_requestable)",
+    )
+    p_caps_ls.add_argument(
+        "--agent-requestable", action="store_true",
+        help="only show capabilities the agent is allowed to request",
+    )
+    p_caps_ls.add_argument(
+        "--json", action="store_true",
+        help="emit JSON instead of a human-readable table",
+    )
+    p_caps_show = caps_sub.add_parser(
+        "show", help="print full details for one capability",
+    )
+    p_caps_show.add_argument("name", help="capability name (e.g. local_build)")
+    p_caps_show.add_argument(
+        "--json", action="store_true",
+        help="emit JSON instead of a human-readable summary",
+    )
+
     p_ui = sub.add_parser("ui", help="launch the local web UI")
     p_ui.add_argument("--host", default="127.0.0.1")
     p_ui.add_argument("--port", type=int, default=8765)
@@ -277,6 +310,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "schema":
         return _cmd_schema_validate(args.file, args.schema)
+
+    if args.cmd == "capabilities":
+        if args.capabilities_cmd == "ls":
+            return _cmd_capabilities_ls(
+                category=args.category,
+                agent_only=args.agent_requestable,
+                as_json=args.json,
+            )
+        if args.capabilities_cmd == "show":
+            return _cmd_capabilities_show(name=args.name, as_json=args.json)
 
     cfg = HarnessConfig.load(repo_root=repo, explicit_path=args.config)
     resolved = cfg.resolved(repo)
@@ -975,6 +1018,106 @@ def _cmd_scenarios_validate(
     if total_errors:
         return 1
     if strict and total_warnings:
+        return 1
+    return 0
+
+
+def _cmd_capabilities_ls(
+    *, category: str | None, agent_only: bool, as_json: bool,
+) -> int:
+    """``dev-loop capabilities ls`` — list the registry as a table or JSON.
+
+    Mirrors the Build > Capabilities panel in the web UI so a user
+    debugging "why can't the agent request X?" sees identical information
+    in either surface. Rows are pre-sorted (category, then name) by the
+    public ``list_capabilities`` helper.
+    """
+    rows = list_capabilities()
+    if category:
+        rows = [r for r in rows if r["category"] == category]
+    if agent_only:
+        rows = [r for r in rows if r["agent_requestable"]]
+
+    if as_json:
+        print(json.dumps({"capabilities": rows}, indent=2))
+        return 0
+
+    if not rows:
+        if category or agent_only:
+            print("no capabilities matched the given filters.")
+        else:
+            print("no capabilities registered.")
+        return 0
+
+    headers = ("NAME", "CATEGORY", "AGENT", "TIMEOUT", "MANIFEST", "IMPL", "FORCED")
+    table = [headers]
+    for r in rows:
+        forced = ",".join(
+            f"{k}={v}" for k, v in sorted((r.get("forced_params") or {}).items())
+        ) or "-"
+        table.append((
+            r["name"],
+            r["category"],
+            "yes" if r["agent_requestable"] else "-",
+            f"{r['timeout_seconds']}s",
+            "yes" if r["uses_run_manifest"] else "-",
+            "yes" if r["has_impl"] else "MISSING",
+            _truncate(forced, 36),
+        ))
+    widths = [max(len(row[i]) for row in table) for i in range(len(headers))]
+    for row in table:
+        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip())
+
+    missing = [r["name"] for r in rows if not r["has_impl"]]
+    if missing:
+        print()
+        print(
+            f"warning: {len(missing)} capabilit"
+            f"{'y' if len(missing) == 1 else 'ies'} declared in registry.yaml "
+            f"without a bound implementation: {', '.join(missing)}"
+        )
+        return 1
+    return 0
+
+
+def _cmd_capabilities_show(*, name: str, as_json: bool) -> int:
+    detail = show_capability(name)
+    if detail is None:
+        print(f"error: capability not found: {name}", file=sys.stderr)
+        print(
+            "  try `dev-loop capabilities ls` to see registered capabilities.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if as_json:
+        print(json.dumps(detail, indent=2))
+        return 0
+
+    print(f"name:              {detail['name']}")
+    print(f"category:          {detail['category']}")
+    print(f"agent_requestable: {_fmt_bool(detail['agent_requestable'])}")
+    print(f"timeout_seconds:   {detail['timeout_seconds']}")
+    print(f"uses_run_manifest: {_fmt_bool(detail['uses_run_manifest'])}")
+    print(f"redacts_output:    {_fmt_bool(detail['redacts_output'])}")
+    print(f"audit:             {_fmt_bool(detail['audit'])}")
+    print(f"prod_possible:     {_fmt_bool(detail['prod_possible'])}")
+    print(f"implementation:    {'bound' if detail['has_impl'] else 'MISSING'}")
+
+    forced = detail.get("forced_params") or {}
+    if forced:
+        print("forced_params:")
+        for k, v in sorted(forced.items()):
+            print(f"  {k}: {json.dumps(v)}")
+    else:
+        print("forced_params:    -")
+
+    if not detail["has_impl"]:
+        print()
+        print(
+            "warning: this capability is declared in registry.yaml but no "
+            "implementation is bound. Invoking it will return an error."
+        )
         return 1
     return 0
 
