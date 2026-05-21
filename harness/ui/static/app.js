@@ -562,6 +562,7 @@ let SC_CURRENT = null;      // {name, task_request, task_contract, ..., extras, 
 let SC_LOADED_JSON = null;  // stringified snapshot for dirty comparison
 let SC_VALIDATE_TIMER = null;
 let SC_NAME = null;
+let SC_HEALTH_BY_NAME = {};  // name -> {valid, n_errors, n_warnings, e2e_status}
 const SC_LIST_FIELDS = [
   "task_contract.success_criteria",
   "task_contract.assumptions",
@@ -579,9 +580,10 @@ async function refreshBuildScenarios() {
   const scenarios = data.scenarios || [];
   const scenariosDir = data.scenarios_dir || "scenarios/";
   $("#sc-new-name-hint").textContent = scenariosDir + "/";
+  SC_HEALTH_BY_NAME = Object.fromEntries(scenarios.map(s => [s.name, s]));
   const sel = $("#sc-select");
   sel.innerHTML = scenarios.map(
-    s => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}</option>`,
+    s => `<option value="${escapeHtml(s.name)}">${escapeHtml(scenarioOptionLabel(s))}</option>`,
   ).join("");
   const empty = scenarios.length === 0;
   $("#sc-empty").classList.toggle("hidden", !empty);
@@ -593,12 +595,46 @@ async function refreshBuildScenarios() {
   if (empty) {
     $("#sc-path").textContent = "";
     $("#sc-issues").classList.add("hidden");
+    renderScHealth(null);
     return;
   }
   const want = SC_NAME && scenarios.some(s => s.name === SC_NAME)
     ? SC_NAME : scenarios[0].name;
   sel.value = want;
   await loadScenario(want);
+}
+
+// Mirror of the CLI's ``dev-loop scenarios ls`` row formatting so the
+// picker reveals broken scenarios without an extra round-trip.
+function scenarioOptionLabel(s) {
+  const bits = [s.name];
+  if (s.e2e_status === "failed") bits.push("[failed e2e]");
+  if (s.n_errors) bits.push(`(${s.n_errors} err${s.n_errors === 1 ? "" : "s"})`);
+  else if (s.n_warnings) bits.push(`(${s.n_warnings} warn${s.n_warnings === 1 ? "" : "s"})`);
+  return bits.join(" ");
+}
+
+function renderScHealth(summary) {
+  const host = $("#sc-health");
+  if (!host) return;
+  if (!summary) { host.innerHTML = ""; host.classList.add("hidden"); return; }
+  const parts = [];
+  if (summary.n_errors) {
+    parts.push(`<span class="pill fail" title="Lint errors block runs">` +
+      `${summary.n_errors} error${summary.n_errors === 1 ? "" : "s"}</span>`);
+  } else if (summary.n_warnings) {
+    parts.push(`<span class="pill warn" title="Lint warnings">` +
+      `${summary.n_warnings} warning${summary.n_warnings === 1 ? "" : "s"}</span>`);
+  } else if (summary.valid) {
+    parts.push(`<span class="pill pass" title="No lint issues">lint clean</span>`);
+  }
+  if (summary.e2e_status === "passed") {
+    parts.push(`<span class="pill pass" title="Canned e2e status">e2e: passed</span>`);
+  } else if (summary.e2e_status === "failed") {
+    parts.push(`<span class="pill fail" title="Canned e2e status">e2e: failed</span>`);
+  }
+  host.innerHTML = parts.join(" ");
+  host.classList.toggle("hidden", parts.length === 0);
 }
 
 async function loadScenario(name) {
@@ -610,6 +646,7 @@ async function loadScenario(name) {
   $("#sc-path").textContent = data.path;
   populateScenarioForm(SC_CURRENT);
   renderScenarioIssues(data.issues || []);
+  renderScHealth(SC_HEALTH_BY_NAME[name] || null);
   setScDirty(false);
   $("#sc-status").textContent = "";
   // Default to form view on every load so a switch between scenarios
@@ -1334,7 +1371,8 @@ async function refreshRunTab() {
 async function refreshScenariosForLaunch() {
   const {scenarios} = await getJSON("/api/scenarios");
   $("#impl-scenario").innerHTML = scenarios.map(
-    s => `<option value="${s.name}">${s.name}</option>`).join("");
+    s => `<option value="${escapeHtml(s.name)}">${escapeHtml(scenarioOptionLabel(s))}</option>`,
+  ).join("");
   $("#impl-scenario-row").style.display =
     $("#impl-provider").value === "replay" ? "" : "none";
   const empty = scenarios.length === 0;

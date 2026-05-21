@@ -94,6 +94,32 @@ def test_scenario_create_then_listed(tmp_path: Path):
         assert "foo-001" in names
 
 
+def test_scenarios_endpoint_embeds_lint_summary(tmp_path: Path):
+    """``/api/scenarios`` must expose the same lint/health fields the CLI's
+    ``scenarios ls`` prints so the Build tab's picker can show a badge
+    per scenario without an extra round-trip."""
+    sc_dir = tmp_path / "scenarios" / "broken-001"
+    sc_dir.mkdir(parents=True)
+    (sc_dir / "task_request.md").write_text("do a thing", encoding="utf-8")
+    (sc_dir / "task_contract.json").write_text(
+        '{"type": "task_contract"}', encoding="utf-8")
+    (sc_dir / "implementation_result.json").write_text(
+        '{"type": "implementation_result"}', encoding="utf-8")
+    (sc_dir / "e2e_result.json").write_text(
+        '{"status": "passed", "test_suite": "x", "duration_seconds": 1}',
+        encoding="utf-8")
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/scenarios")
+        assert status == 200
+        rows = {s["name"]: s for s in json.loads(body)["scenarios"]}
+        row = rows["broken-001"]
+        for key in ("valid", "n_errors", "n_warnings", "e2e_status", "goal"):
+            assert key in row, key
+        assert row["valid"] is False
+        assert row["n_errors"] >= 1
+        assert row["e2e_status"] == "passed"
+
+
 def test_capabilities_endpoint(tmp_path: Path):
     with _server(tmp_path) as (port, _):
         status, body = _get(port, "/api/capabilities")

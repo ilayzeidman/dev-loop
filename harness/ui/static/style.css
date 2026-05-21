@@ -725,6 +725,10 @@ button:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
 .sc-toolbar { margin-bottom: 0.4em; }
 .sc-toolbar select { flex: 1 1 16em; max-width: 28em; }
 #sc-dirty-pill.dirty { color: var(--warn); font-size: 0.78em; }
+.sc-health { display: inline-flex; gap: 0.35em; align-items: center;
+  font-size: 0.78em; }
+.sc-health .pill { font-size: 0.72em; padding: 0.1em 0.55em; }
+.sc-health.hidden { display: none; }
 .sc-path { font-family: ui-monospace, monospace; font-size: 0.8em;
   margin-left: auto; word-break: break-all; }
 

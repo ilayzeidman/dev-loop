@@ -100,6 +100,7 @@ from ..scenarios import (
     default_implementation_result,
     default_task_contract,
     dump_scenario_files,
+    list_scenarios,
     load_scenario_form,
     validate_scenario_form,
 )
@@ -806,18 +807,27 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
         def _api_list_scenarios(self) -> None:
             _, r = _resolved()
             sc_dir = r.scenarios_dir
+            # Lint/health summary comes from the same library call powering
+            # ``dev-loop scenarios ls`` so CLI and UI report identical state.
+            summaries = {s["name"]: s for s in list_scenarios(sc_dir)}
             out: list[dict[str, Any]] = []
             if sc_dir.exists():
                 for d in sorted(sc_dir.iterdir()):
                     if not d.is_dir():
                         continue
                     req = d / "task_request.md"
+                    summary = summaries.get(d.name, {})
                     out.append({
                         "name": d.name,
                         "path": str(d),
                         "files": sorted(f.name for f in d.iterdir() if f.is_file()),
                         "request_preview":
                             (req.read_text(encoding="utf-8")[:600] if req.exists() else None),
+                        "goal": summary.get("goal", ""),
+                        "e2e_status": summary.get("e2e_status"),
+                        "n_errors": summary.get("n_errors", 0),
+                        "n_warnings": summary.get("n_warnings", 0),
+                        "valid": summary.get("valid", True),
                     })
             self._send_json(200, {"scenarios": out, "scenarios_dir": str(sc_dir)})
 
