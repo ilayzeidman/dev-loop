@@ -5,6 +5,7 @@ Pure stdlib. Serves a single-page app plus a JSON API:
 Read endpoints
   GET  /api/config                       resolved config
   GET  /api/config/raw                   raw config.yaml text
+  GET  /api/onboarding                   first-run setup checklist
   GET  /api/runs                         list of task runs + active jobs
   GET  /api/runs/<task-id>               task manifest
   GET  /api/runs/<task-id>/report        rendered Markdown report
@@ -26,6 +27,7 @@ Read endpoints
 
 Write endpoints
   POST /api/config/raw                   replace config.yaml
+  POST /api/init                         one-click onboarding (config + starter)
   POST /api/playbooks/<name>             write playbook (repo-local override)
   POST /api/scenarios/<name>/file/<fn>   write scenario file
   POST /api/scenarios                    create new scenario dir
@@ -47,7 +49,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from ..config import CONFIG_DIR_NAME, CONFIG_FILE_NAME, DEFAULT_CONFIG_YAML, HarnessConfig
+from ..config import (
+    CONFIG_DIR_NAME,
+    CONFIG_FILE_NAME,
+    DEFAULT_CONFIG_YAML,
+    STARTER_SCENARIO_NAME,
+    HarnessConfig,
+    append_gitignore,
+    write_default_config,
+    write_starter_scenario,
+)
 from ..playbooks import PLAYBOOK_DIR
 from ..schemas import SCHEMA_DIR
 from ..util import read_json
@@ -207,6 +218,7 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 self._serve_static(p[len("/static/"):], _guess_type(p)); return
             if p == "/api/config": self._api_config(); return
             if p == "/api/config/raw": self._api_config_raw(); return
+            if p == "/api/onboarding": self._api_onboarding(); return
             if p == "/api/runs": self._api_list_runs(); return
             if p == "/api/scenarios": self._api_list_scenarios(); return
             if p == "/api/capabilities": self._api_list_capabilities(); return
@@ -229,6 +241,8 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 self._api_implement(self._read_json_body()); return
             if p == "/api/config/raw":
                 self._api_config_raw_post(self._read_body().decode("utf-8")); return
+            if p == "/api/init":
+                self._api_init(self._read_json_body()); return
             if p == "/api/scenarios":
                 self._api_scenario_create(self._read_json_body()); return
             if p.startswith("/api/playbooks/"):
@@ -299,6 +313,103 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             cd.mkdir(parents=True, exist_ok=True)
             (cd / CONFIG_FILE_NAME).write_text(text, encoding="utf-8")
             self._send_json(200, {"ok": True})
+
+        # ----- onboarding --------------------------------------------
+
+        def _api_onboarding(self) -> None:
+            """Snapshot of how 'set up' this repo is.
+
+            Drives the first-run wizard so a brand new user sees what's
+            done and what's still needed without leaving the UI.
+            """
+            cfg, r = _resolved()
+            cf = repo / CONFIG_DIR_NAME / CONFIG_FILE_NAME
+            config_exists = cf.exists()
+            scenarios_dir = r.scenarios_dir
+            scenario_names: list[str] = []
+            if scenarios_dir.exists():
+                scenario_names = sorted(
+                    d.name for d in scenarios_dir.iterdir() if d.is_dir()
+                )
+            runs_dir = r.runs_dir
+            run_count = 0
+            if runs_dir.exists():
+                run_count = sum(
+                    1 for d in runs_dir.iterdir()
+                    if d.is_dir() and (d / "task_manifest.json").exists()
+                )
+            gi = repo / ".gitignore"
+            gitignored = (
+                gi.exists() and ".dev-loop/runs/" in gi.read_text(encoding="utf-8")
+            )
+            steps = [
+                {
+                    "id": "config",
+                    "title": "Create .dev-loop/config.yaml",
+                    "done": config_exists,
+                    "detail": str(cf),
+                },
+                {
+                    "id": "gitignore",
+                    "title": "Ignore run artifacts in git",
+                    "done": gitignored,
+                    "detail": str(gi),
+                },
+                {
+                    "id": "scenarios",
+                    "title": "Install a replay scenario to try",
+                    "done": bool(scenario_names),
+                    "detail": str(scenarios_dir),
+                    "scenarios": scenario_names,
+                },
+                {
+                    "id": "first_run",
+                    "title": "Run your first /implement loop",
+                    "done": run_count > 0,
+                    "detail": f"{run_count} run(s) recorded",
+                },
+            ]
+            is_complete = all(s["done"] for s in steps)
+            self._send_json(200, {
+                "repo": str(repo),
+                "repo_name": repo.name,
+                "config_exists": config_exists,
+                "gitignored": gitignored,
+                "scenarios": scenario_names,
+                "run_count": run_count,
+                "starter_scenario": STARTER_SCENARIO_NAME,
+                "starter_installed": STARTER_SCENARIO_NAME in scenario_names,
+                "default_provider": r.default_provider,
+                "is_complete": is_complete,
+                "steps": steps,
+            })
+
+        def _api_init(self, body: Any) -> None:
+            """One-click setup. Idempotent.
+
+            Body (all optional):
+              install_starter: bool   default True — copy hello-dev-loop scenario
+              force: bool             default False — overwrite an existing config
+            """
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "body must be a JSON object"}); return
+            install_starter = bool(body.get("install_starter", True))
+            force = bool(body.get("force", False))
+            actions: list[str] = []
+            cf, created = write_default_config(repo, force=force)
+            if created:
+                actions.append(f"wrote {cf}")
+            elif force:
+                actions.append(f"overwrote {cf}")
+            else:
+                actions.append(f"kept existing {cf}")
+            if append_gitignore(repo):
+                actions.append("updated .gitignore")
+            if install_starter:
+                _, r = _resolved()
+                sp = write_starter_scenario(r.scenarios_dir)
+                actions.append(f"installed starter scenario at {sp}")
+            self._send_json(200, {"ok": True, "actions": actions})
 
         # ----- runs ---------------------------------------------------
 

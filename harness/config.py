@@ -190,3 +190,92 @@ GITIGNORE_LINES = """# dev-loop
 runs/
 .dev-loop/runs/
 """
+
+# A tiny self-contained replay scenario for first-run onboarding. Installed
+# into ``<repo>/<scenarios_dir>/`` by ``dev-loop init --starter`` or the UI
+# onboarding panel. Doesn't reference any external infrastructure so a brand
+# new user can hit "Try a demo run" and see a green E2E within seconds.
+STARTER_SCENARIO_NAME = "hello-dev-loop"
+STARTER_SCENARIO_FILES: dict[str, str] = {
+    "task_request.md": (
+        "# Hello, dev-loop\n\n"
+        "This is the starter scenario. The agent (in replay mode) will\n"
+        "pretend to implement a tiny change and the harness will report a\n"
+        "passing E2E. Use it to verify your setup before pointing dev-loop\n"
+        "at a real task.\n"
+    ),
+    "task_contract.json": (
+        '{\n'
+        '  "type": "task_contract",\n'
+        '  "implementation_goal": "Demonstrate a clean end-to-end run with the replay provider.",\n'
+        '  "assumptions": ["no external infrastructure is needed for this demo"],\n'
+        '  "success_criteria": ["hello-dev-loop-e2e reports passed"],\n'
+        '  "non_goals": ["touching production code"],\n'
+        '  "likely_components": [],\n'
+        '  "validation_plan": ["replay-only E2E"],\n'
+        '  "ambiguities": [],\n'
+        '  "can_start_without_human": true\n'
+        '}\n'
+    ),
+    "implementation_result.json": (
+        '{\n'
+        '  "type": "implementation_result",\n'
+        '  "summary": "Demo implementation — no real code change.",\n'
+        '  "hypothesis": "If the harness can replay this scenario it is wired up correctly.",\n'
+        '  "confidence": "high",\n'
+        '  "expected_validation": ["hello-dev-loop-e2e passes"],\n'
+        '  "risk_notes": [],\n'
+        '  "claimed_changed_files": []\n'
+        '}\n'
+    ),
+    "e2e_result.json": (
+        '{\n'
+        '  "status": "passed",\n'
+        '  "test_suite": "hello-dev-loop-e2e",\n'
+        '  "duration_seconds": 1\n'
+        '}\n'
+    ),
+}
+
+
+def write_starter_scenario(scenarios_dir: Path) -> Path:
+    """Write the bundled starter scenario into ``scenarios_dir``.
+
+    Idempotent: if the directory already exists, missing files are added
+    but existing files are left alone. Returns the scenario directory.
+    """
+    dest = scenarios_dir / STARTER_SCENARIO_NAME
+    dest.mkdir(parents=True, exist_ok=True)
+    for name, content in STARTER_SCENARIO_FILES.items():
+        f = dest / name
+        if not f.exists():
+            f.write_text(content, encoding="utf-8")
+    return dest
+
+
+def append_gitignore(repo_root: Path) -> bool:
+    """Ensure dev-loop ledger paths are gitignored. Returns True if the
+    file was created or modified."""
+    gi = repo_root / ".gitignore"
+    if gi.exists():
+        existing = gi.read_text(encoding="utf-8")
+        if ".dev-loop/runs/" in existing:
+            return False
+        with gi.open("a", encoding="utf-8") as f:
+            if not existing.endswith("\n"):
+                f.write("\n")
+            f.write(GITIGNORE_LINES)
+        return True
+    gi.write_text(GITIGNORE_LINES, encoding="utf-8")
+    return True
+
+
+def write_default_config(repo_root: Path, *, force: bool = False) -> tuple[Path, bool]:
+    """Scaffold ``.dev-loop/config.yaml``. Returns ``(path, created)``."""
+    cd = repo_root / CONFIG_DIR_NAME
+    cd.mkdir(parents=True, exist_ok=True)
+    cf = cd / CONFIG_FILE_NAME
+    if cf.exists() and not force:
+        return cf, False
+    cf.write_text(DEFAULT_CONFIG_YAML, encoding="utf-8")
+    return cf, True

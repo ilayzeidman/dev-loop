@@ -232,6 +232,78 @@ def test_job_get_returns_isolated_snapshot(tmp_path: Path):
     assert again["status"] == "queued"
 
 
+def test_onboarding_reports_unconfigured_state(tmp_path: Path):
+    """A fresh repo should report nothing done: no config, no scenarios, no runs."""
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/onboarding")
+        assert status == 200
+        data = json.loads(body)
+        assert data["config_exists"] is False
+        assert data["scenarios"] == []
+        assert data["run_count"] == 0
+        assert data["starter_installed"] is False
+        assert data["is_complete"] is False
+        ids = [s["id"] for s in data["steps"]]
+        assert ids == ["config", "gitignore", "scenarios", "first_run"]
+        assert all(s["done"] is False for s in data["steps"])
+
+
+def test_init_endpoint_writes_config_and_starter(tmp_path: Path):
+    """POST /api/init should scaffold config, gitignore, and the starter."""
+    with _server(tmp_path) as (port, _):
+        status, data = _post_json(port, "/api/init", {"install_starter": True})
+        assert status == 200
+        assert data["ok"] is True
+        assert (tmp_path / ".dev-loop" / "config.yaml").exists()
+        assert (tmp_path / ".gitignore").read_text(encoding="utf-8").find(
+            ".dev-loop/runs/") != -1
+        starter = tmp_path / "scenarios" / "hello-dev-loop"
+        assert starter.is_dir()
+        assert (starter / "task_request.md").exists()
+        assert (starter / "e2e_result.json").exists()
+        # Onboarding now reflects three of four steps done.
+        _, ob = _get(port, "/api/onboarding")
+        ob_data = json.loads(ob)
+        done_ids = {s["id"] for s in ob_data["steps"] if s["done"]}
+        assert {"config", "gitignore", "scenarios"} <= done_ids
+        assert "first_run" not in done_ids  # no runs yet
+        assert ob_data["starter_installed"] is True
+
+
+def test_init_endpoint_is_idempotent(tmp_path: Path):
+    """Re-running /api/init must not error and must not clobber an existing
+    config (unless force is passed)."""
+    with _server(tmp_path) as (port, _):
+        _post_json(port, "/api/init", {"install_starter": False})
+        cfg_path = tmp_path / ".dev-loop" / "config.yaml"
+        original = cfg_path.read_text(encoding="utf-8")
+        # Tamper with the config.
+        cfg_path.write_text(original + "\nnotes: keep me\n", encoding="utf-8")
+        tampered = cfg_path.read_text(encoding="utf-8")
+        # Second call without force keeps the user edits.
+        status, data = _post_json(port, "/api/init", {"install_starter": False})
+        assert status == 200
+        assert cfg_path.read_text(encoding="utf-8") == tampered
+        # With force=True it gets overwritten.
+        _post_json(port, "/api/init", {"install_starter": False, "force": True})
+        assert cfg_path.read_text(encoding="utf-8") == original
+
+
+def test_init_rejects_non_object_body(tmp_path: Path):
+    import urllib.error
+    with _server(tmp_path) as (port, _):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/init",
+            method="POST", data=b'"hi"',
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=2)
+            raise AssertionError("expected HTTPError")
+        except urllib.error.HTTPError as e:
+            assert e.code == 400, e.code
+
+
 def test_scenario_create_blocks_dotdot_name(tmp_path: Path):
     """The create endpoint must also reject ``..`` (its existing check did
     via ``startswith('.')``; this pins that behaviour)."""

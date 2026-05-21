@@ -22,9 +22,11 @@ from .capabilities import load_default_registry
 from .config import (
     CONFIG_DIR_NAME,
     CONFIG_FILE_NAME,
-    DEFAULT_CONFIG_YAML,
-    GITIGNORE_LINES,
+    STARTER_SCENARIO_NAME,
     HarnessConfig,
+    append_gitignore,
+    write_default_config,
+    write_starter_scenario,
 )
 from .orchestrator import Orchestrator, OrchestratorConfig
 
@@ -41,6 +43,9 @@ def main(argv: list[str] | None = None) -> int:
     p_init = sub.add_parser("init", help="scaffold .dev-loop/config.yaml in this repo")
     p_init.add_argument("--force", action="store_true",
                         help="overwrite existing config")
+    p_init.add_argument("--starter", action="store_true",
+                        help="also install the 'hello-dev-loop' starter scenario "
+                             "so 'dev-loop replay hello-dev-loop' just works")
 
     p_impl = sub.add_parser("implement", help="run the autonomous loop")
     p_impl.add_argument("--request", required=True, help="feature request prompt")
@@ -77,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     repo = args.repo.resolve()
 
     if args.cmd == "init":
-        return _cmd_init(repo, force=args.force)
+        return _cmd_init(repo, force=args.force, starter=args.starter)
 
     if args.cmd == "config":
         return _cmd_config_show(repo, explicit=args.config)
@@ -124,34 +129,31 @@ def main(argv: list[str] | None = None) -> int:
 # subcommand handlers ---------------------------------------------------
 
 
-def _cmd_init(repo: Path, *, force: bool) -> int:
-    cd = repo / CONFIG_DIR_NAME
-    cd.mkdir(parents=True, exist_ok=True)
-    cfg = cd / CONFIG_FILE_NAME
-    if cfg.exists() and not force:
+def _cmd_init(repo: Path, *, force: bool, starter: bool = False) -> int:
+    cfg, created = write_default_config(repo, force=force)
+    if not created:
         print(f"already exists: {cfg} (use --force to overwrite)", file=sys.stderr)
         return 1
-    cfg.write_text(DEFAULT_CONFIG_YAML, encoding="utf-8")
 
-    # Append gitignore entries if .gitignore exists and doesn't already
-    # ignore the runs dir.
-    gi = repo / ".gitignore"
-    if gi.exists():
-        existing = gi.read_text(encoding="utf-8")
-        if ".dev-loop/runs/" not in existing:
-            with gi.open("a", encoding="utf-8") as f:
-                if not existing.endswith("\n"):
-                    f.write("\n")
-                f.write(GITIGNORE_LINES)
-    else:
-        gi.write_text(GITIGNORE_LINES, encoding="utf-8")
+    append_gitignore(repo)
+
+    starter_path: Path | None = None
+    if starter:
+        cfg_obj = HarnessConfig.load(repo_root=repo)
+        resolved = cfg_obj.resolved(repo)
+        starter_path = write_starter_scenario(resolved.scenarios_dir)
 
     print(f"wrote {cfg}")
     print(f"  runs will be stored under: {repo / '.dev-loop' / 'runs'}")
+    if starter_path is not None:
+        print(f"  starter scenario installed: {starter_path}")
     print("\nNext steps:")
     print("  dev-loop config show")
-    print("  dev-loop implement --request 'fix gpu init timeout' \\")
-    print("    --provider replay --replay-scenario scenarios/gpu-init-timeout-001")
+    if starter_path is not None:
+        print(f"  dev-loop replay {STARTER_SCENARIO_NAME}")
+    else:
+        print("  dev-loop init --starter        # adds a runnable demo scenario")
+        print("  dev-loop ui                    # configure & run from the browser")
     return 0
 
 

@@ -48,7 +48,103 @@ async function loadConfig() {
   RESOLVED = await getJSON("/api/config");
   $("#repo-pill").textContent = RESOLVED.repo;
 }
-loadConfig().catch(e => { $("#repo-pill").textContent = "error: " + e; });
+
+// ----- onboarding -------------------------------------------------------
+
+let ONBOARDING = null;
+// Declared early so onboarding's "Try demo" can launch into the Run tab.
+let CURRENT_JOB_ID = null;
+
+async function loadOnboarding() {
+  ONBOARDING = await getJSON("/api/onboarding");
+  renderOnboarding();
+}
+
+function renderOnboarding() {
+  const o = ONBOARDING;
+  if (!o) return;
+  const panel = $("#onboarding-panel");
+  const title = $("#onboarding-title");
+  const subtitle = $("#onboarding-subtitle");
+  const list = $("#onboarding-checklist");
+  const demoBtn = $("#onboarding-demo");
+
+  list.innerHTML = o.steps.map(s => `
+    <li class="step ${s.done ? "done" : "pending"}">
+      <span class="step-mark">${s.done ? "✓" : "•"}</span>
+      <span class="step-title">${escapeHtml(s.title)}</span>
+      <span class="step-detail muted">${escapeHtml(s.detail || "")}</span>
+    </li>`).join("");
+
+  if (o.is_complete) {
+    title.textContent = `${o.repo_name} is set up`;
+    subtitle.textContent = "All four steps done — jump to Run or Analyze any time.";
+    $("#onboarding-init").textContent = "Re-run setup";
+    $("#onboarding-init").classList.add("secondary");
+  } else if (o.config_exists) {
+    title.textContent = `Finish setting up ${o.repo_name}`;
+    subtitle.textContent = "A couple more steps and you're ready to run.";
+    $("#onboarding-init").classList.remove("secondary");
+  } else {
+    title.textContent = `Welcome to dev-loop — ${o.repo_name}`;
+    subtitle.textContent = "Two clicks and this repo is wired up.";
+    $("#onboarding-init").classList.remove("secondary");
+  }
+
+  demoBtn.disabled = !o.starter_installed;
+  demoBtn.title = o.starter_installed
+    ? "Run the bundled hello-dev-loop scenario end-to-end"
+    : "Install the starter scenario first";
+
+  // Only show the panel while there's something useful to do or to
+  // celebrate; once the user has runs recorded we get out of the way.
+  const shouldShow = !o.is_complete || o.run_count === 0;
+  panel.classList.toggle("hidden", !shouldShow);
+}
+
+async function runOnboardingInit() {
+  const installStarter = $("#onboarding-starter").checked;
+  $("#onboarding-status").textContent = "setting up…";
+  try {
+    const res = await postJSON("/api/init", {install_starter: installStarter});
+    $("#onboarding-status").textContent = "done ✓";
+    await loadConfig();
+    await loadOnboarding();
+    // Refresh dependent panels if visible.
+    if (!$("#builder-config").classList.contains("hidden")) refreshBuildConfig();
+    if (!$("#tab-run").classList.contains("hidden")) refreshRunTab();
+  } catch (e) {
+    $("#onboarding-status").textContent = "error: " + e;
+  }
+}
+
+async function runOnboardingDemo() {
+  if (!ONBOARDING || !ONBOARDING.starter_installed) return;
+  $("#onboarding-status").textContent = "launching demo…";
+  try {
+    const {job_id} = await postJSON("/api/implement", {
+      request: "Verify the harness wiring with the bundled starter scenario.",
+      provider: "replay",
+      replay_scenario: ONBOARDING.starter_scenario,
+    });
+    CURRENT_JOB_ID = job_id;
+    showTab("run");
+    pollJob();
+    $("#onboarding-status").textContent = "";
+  } catch (e) {
+    $("#onboarding-status").textContent = "error: " + e;
+  }
+}
+
+$("#onboarding-init").addEventListener("click", runOnboardingInit);
+$("#onboarding-demo").addEventListener("click", runOnboardingDemo);
+
+(async () => {
+  try { await loadConfig(); }
+  catch (e) { $("#repo-pill").textContent = "error: " + e; return; }
+  try { await loadOnboarding(); }
+  catch (e) { /* non-fatal */ }
+})();
 
 // ----- BUILD tab --------------------------------------------------------
 
@@ -200,7 +296,6 @@ $("#sc-new").addEventListener("click", async () => {
 
 // ----- RUN tab ----------------------------------------------------------
 
-let CURRENT_JOB_ID = null;
 async function refreshRunTab() {
   await refreshScenariosForLaunch();
   await refreshJobList();
@@ -211,7 +306,26 @@ async function refreshScenariosForLaunch() {
     s => `<option value="${s.name}">${s.name}</option>`).join("");
   $("#impl-scenario-row").style.display =
     $("#impl-provider").value === "replay" ? "" : "none";
+  const empty = scenarios.length === 0;
+  $("#impl-scenario").classList.toggle("hidden", empty);
+  $("#impl-scenario-empty").classList.toggle("hidden", !empty);
+  // Block launch when in replay mode with no scenarios.
+  const replayWithoutScenario =
+    $("#impl-provider").value === "replay" && empty;
+  $("#impl-go").disabled = replayWithoutScenario;
+  $("#impl-go").title = replayWithoutScenario
+    ? "Install a scenario first (see message above)" : "";
 }
+
+document.addEventListener("click", async (e) => {
+  const t = e.target;
+  if (t && t.id === "impl-install-starter") {
+    e.preventDefault();
+    await postJSON("/api/init", {install_starter: true});
+    await loadOnboarding();
+    await refreshScenariosForLaunch();
+  }
+});
 $("#impl-provider").addEventListener("change", () => {
   $("#impl-scenario-row").style.display =
     $("#impl-provider").value === "replay" ? "" : "none";
@@ -222,7 +336,13 @@ $("#impl-go").addEventListener("click", async () => {
     provider: $("#impl-provider").value,
   };
   if (!body.request) { alert("write a request first"); return; }
-  if (body.provider === "replay") body.replay_scenario = $("#impl-scenario").value;
+  if (body.provider === "replay") {
+    body.replay_scenario = $("#impl-scenario").value;
+    if (!body.replay_scenario) {
+      alert("install or pick a replay scenario first");
+      return;
+    }
+  }
   const mi = $("#impl-maxiter").value;
   if (mi) body.max_iterations = parseInt(mi, 10);
   const {job_id} = await postJSON("/api/implement", body);
@@ -257,7 +377,11 @@ async function pollJob() {
     $("#job-log").textContent = job.log || "(waiting…)";
     done = ["completed", "failed", "errored"].includes(job.status);
     if (!done) await new Promise(r => setTimeout(r, 800));
-    else await refreshJobList();
+    else {
+      await refreshJobList();
+      // A successful first run flips the onboarding checklist.
+      try { await loadOnboarding(); } catch (_) {}
+    }
   }
 }
 

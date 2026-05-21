@@ -30,6 +30,19 @@ def test_init_idempotent_with_force(tmp_path: Path):
     assert rc == 0
 
 
+def test_init_starter_installs_demo_scenario(tmp_path: Path):
+    """``dev-loop init --starter`` should put a runnable scenario in the
+    repo so a brand new user can replay it without picking files by hand."""
+    rc = cli.main(["--repo", str(tmp_path), "init", "--starter"])
+    assert rc == 0
+    starter = tmp_path / "scenarios" / "hello-dev-loop"
+    assert starter.is_dir()
+    assert (starter / "task_request.md").exists()
+    assert (starter / "task_contract.json").exists()
+    assert (starter / "implementation_result.json").exists()
+    assert (starter / "e2e_result.json").exists()
+
+
 def test_config_show_emits_json(tmp_path: Path, capsys):
     cli.main(["--repo", str(tmp_path), "init"])
     capsys.readouterr()  # discard init output

@@ -133,6 +133,48 @@ pre { background: var(--code); border: 1px solid var(--border);
   border-radius: 6px; padding: 0.7em; margin-bottom: 0.7em;
 }
 
+/* onboarding panel */
+.onboarding {
+  border: 1px solid var(--accent);
+  background:
+    linear-gradient(180deg, rgba(122, 162, 255, 0.10), rgba(122, 162, 255, 0.02));
+  box-shadow: 0 0 0 1px rgba(122, 162, 255, 0.15) inset;
+}
+.onboarding h2 { margin-bottom: 0.2em; }
+.checklist {
+  list-style: none; padding: 0; margin: 0.8em 0 1em 0;
+  display: grid; gap: 0.4em;
+}
+.checklist .step {
+  display: grid; grid-template-columns: 1.4em max-content 1fr; gap: 0.6em;
+  align-items: baseline; padding: 0.4em 0.6em;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel-2);
+}
+.checklist .step.done { border-color: rgba(110, 231, 183, 0.5); }
+.checklist .step-mark {
+  display: inline-block; width: 1.2em; height: 1.2em; line-height: 1.2em;
+  text-align: center; border-radius: 50%; font-weight: 700;
+  background: var(--code); color: var(--muted);
+}
+.checklist .step.done .step-mark { background: var(--ok); color: #062f24; }
+.checklist .step-title { font-weight: 600; }
+.checklist .step-detail {
+  font-family: ui-monospace, monospace; font-size: 0.8em; opacity: 0.8;
+  overflow-wrap: anywhere;
+}
+.onboarding-cta { margin-top: 0.4em; }
+.onboarding-advanced { margin-top: 0.6em; color: var(--muted); font-size: 0.9em; }
+.onboarding-advanced ul { margin: 0.4em 0; padding-left: 1.2em; }
+.onboarding-advanced summary { cursor: pointer; }
+.onboarding-advanced label { text-transform: none; letter-spacing: 0;
+  font-size: 0.9em; color: var(--fg); display: inline-flex; gap: 0.4em;
+  align-items: center; margin-top: 0.4em; }
+.onboarding-advanced input[type=checkbox] { width: auto; }
+
+button:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
+.hidden { display: none; }
+
 /* small markdown render */
 .md h1, .md h2, .md h3 { margin: 0.8em 0 0.3em 0; }
 .md ul, .md ol { padding-left: 1.3em; }

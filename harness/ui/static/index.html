@@ -35,6 +35,31 @@
       </aside>
       <div class="content">
 
+        <div class="panel onboarding hidden" id="onboarding-panel">
+          <h2 id="onboarding-title">Welcome to dev-loop</h2>
+          <p class="muted" id="onboarding-subtitle">
+            Two clicks and this repo is wired up.
+          </p>
+          <ol class="checklist" id="onboarding-checklist"></ol>
+          <div class="row onboarding-cta">
+            <button id="onboarding-init">Set up this repo</button>
+            <button id="onboarding-demo" class="secondary" disabled
+              title="Available after setup">Try the demo run</button>
+            <span id="onboarding-status" class="muted"></span>
+          </div>
+          <details class="onboarding-advanced">
+            <summary>What this does</summary>
+            <ul>
+              <li>Writes <code>.dev-loop/config.yaml</code> with sane defaults.</li>
+              <li>Adds <code>.dev-loop/runs/</code> to <code>.gitignore</code>.</li>
+              <li>Installs a tiny <code>hello-dev-loop</code> replay scenario so
+                you can hit "Try the demo run" and watch a full pass-through.</li>
+            </ul>
+            <label><input type="checkbox" id="onboarding-starter" checked>
+              install starter scenario</label>
+          </details>
+        </div>
+
         <div class="panel" id="builder-overview">
           <h2>Flow overview</h2>
           <p class="muted">
@@ -149,6 +174,10 @@
         <div id="impl-scenario-row">
           <label>Scenario (for replay)</label>
           <select id="impl-scenario"></select>
+          <p class="muted hidden" id="impl-scenario-empty">
+            No scenarios yet. <a href="#" id="impl-install-starter">Install the starter scenario</a>
+            or add one under Build &gt; Scenarios.
+          </p>
         </div>
         <label>Max iterations (optional)</label>
         <input id="impl-maxiter" type="number" min="1" max="20" placeholder="(use config)">
