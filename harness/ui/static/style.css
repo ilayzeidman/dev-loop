@@ -301,3 +301,27 @@ button:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
   pointer-events: none; z-index: 1000;
 }
 .toast.show { opacity: 1; }
+
+/* Share & reuse (bundles) ------------------------------------------------ */
+.share-section {
+  border-top: 1px solid var(--border);
+  padding-top: 1em; margin-top: 1.2em;
+}
+.share-section:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+.share-section h3 { margin: 0.2em 0 0.5em; }
+#bundle-paste {
+  width: 100%; font-family: ui-monospace, monospace; font-size: 0.8em;
+  background: var(--panel-2); color: var(--fg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.5em; resize: vertical; margin-top: 0.5em;
+}
+#bundle-paste.drop { border-color: var(--accent); background: rgba(122,162,255,0.08); }
+.bundle-table { width: 100%; font-size: 0.85em; margin-top: 0.6em; }
+.bundle-table th, .bundle-table td { padding: 0.3em 0.55em; text-align: left; vertical-align: top; }
+.bundle-table th { color: var(--muted); font-weight: normal; font-size: 0.85em; border-bottom: 1px solid var(--border); }
+.bundle-table tr.status-identical td { opacity: 0.55; }
+.bundle-totals { margin: 0.6em 0; display: flex; gap: 0.4em; }
+.bundle-source { font-size: 0.85em; margin-bottom: 0.3em; }
+#bundle-export-summary { font-size: 0.85em; margin: 0.4em 0 0 1.2em; }
+#bundle-preview { margin-top: 0.8em; }
+#bundle-apply-report { margin-top: 0.8em; }
+#bundle-apply-report h4 { margin: 0.5em 0 0.3em; }

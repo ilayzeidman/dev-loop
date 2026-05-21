@@ -162,7 +162,7 @@ $$('[data-jump]').forEach(a => a.addEventListener("click", e => {
 
 function selectBuilder(name) {
   $$(".builder-nav a").forEach(a => a.classList.toggle("active", a.dataset.builder === name));
-  ["overview", "config", "capabilities", "playbooks", "schemas", "scenarios"].forEach(
+  ["overview", "config", "capabilities", "playbooks", "schemas", "scenarios", "share"].forEach(
     n => $(`#builder-${n}`).classList.toggle("hidden", n !== name)
   );
   if (name === "config") refreshBuildConfig();
@@ -170,6 +170,7 @@ function selectBuilder(name) {
   if (name === "playbooks") refreshBuildPlaybooks();
   if (name === "schemas") refreshBuildSchemas();
   if (name === "scenarios") refreshBuildScenarios();
+  if (name === "share") refreshBuildShare();
 }
 
 function refreshBuildOverview() { /* static */ }
@@ -293,6 +294,241 @@ $("#sc-new").addEventListener("click", async () => {
   $("#sc-select").value = name;
   loadScenario(name);
 });
+
+// ----- Share & reuse (config bundles) -----------------------------------
+
+let BUNDLE_PREVIEW = null;   // {changes, totals, source, note, bundle}
+let BUNDLE_INCLUDE = null;   // Set<string> of display paths to apply
+
+async function refreshBuildShare() {
+  // Pre-populate the export summary so the user sees what they'd ship.
+  $("#bundle-export-status").textContent = "loading…";
+  try {
+    const r = await fetch("/api/bundle/export");
+    if (!r.ok) throw new Error(r.status);
+    const bundle = await r.json();
+    LAST_BUNDLE = bundle;
+    const cfgYes = bundle.config && bundle.config.yaml ? "yes" : "no";
+    const summary = [
+      `<li><code>.dev-loop/config.yaml</code>: ${cfgYes}</li>`,
+      `<li><strong>${bundle.scenarios.length}</strong> scenario${bundle.scenarios.length !== 1 ? "s" : ""}</li>`,
+      `<li><strong>${bundle.playbooks.length}</strong> playbook${bundle.playbooks.length !== 1 ? "s" : ""}</li>`,
+    ];
+    $("#bundle-export-summary").innerHTML = summary.join("");
+    $("#bundle-export-status").textContent = "";
+  } catch (e) {
+    $("#bundle-export-status").textContent = "error: " + e;
+  }
+}
+
+let LAST_BUNDLE = null;
+
+$("#bundle-download").addEventListener("click", async () => {
+  $("#bundle-export-status").textContent = "downloading…";
+  try {
+    const note = $("#bundle-note").value || "";
+    // Hit the export endpoint directly (sets Content-Disposition for a
+    // sensible save-as filename). If a note is provided we build the
+    // download via Blob so we can attach it.
+    let blob, filename;
+    if (note) {
+      const r = await fetch("/api/bundle/export");
+      const bundle = await r.json();
+      bundle.note = note;
+      const text = JSON.stringify(bundle, null, 2) + "\n";
+      blob = new Blob([text], {type: "application/json"});
+      const repoName = (RESOLVED && RESOLVED.repo ? RESOLVED.repo.split(/[\\/]/).pop() : "repo");
+      filename = `${repoName}-dev-loop-bundle.json`;
+    } else {
+      const r = await fetch("/api/bundle/export");
+      blob = await r.blob();
+      const cd = r.headers.get("Content-Disposition") || "";
+      const m = cd.match(/filename="([^"]+)"/);
+      filename = m ? m[1] : "dev-loop-bundle.json";
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 0);
+    $("#bundle-export-status").textContent = "downloaded ✓";
+  } catch (e) {
+    $("#bundle-export-status").textContent = "error: " + e;
+  }
+});
+
+$("#bundle-copy").addEventListener("click", async () => {
+  try {
+    const r = await fetch("/api/bundle/export");
+    const text = await r.text();
+    copyToClipboard(text, "Copied bundle JSON");
+  } catch (e) {
+    $("#bundle-export-status").textContent = "error: " + e;
+  }
+});
+
+$("#bundle-file-input").addEventListener("change", async (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  const text = await f.text();
+  $("#bundle-paste").value = text;
+});
+
+$("#bundle-clear").addEventListener("click", () => {
+  $("#bundle-paste").value = "";
+  $("#bundle-file-input").value = "";
+  $("#bundle-preview").classList.add("hidden");
+  $("#bundle-preview-status").textContent = "";
+  $("#bundle-apply-report").innerHTML = "";
+  BUNDLE_PREVIEW = null;
+});
+
+$("#bundle-preview-btn").addEventListener("click", async () => {
+  const text = $("#bundle-paste").value.trim();
+  if (!text) {
+    $("#bundle-preview-status").textContent = "paste a bundle first";
+    return;
+  }
+  let bundle;
+  try { bundle = JSON.parse(text); }
+  catch (e) {
+    $("#bundle-preview-status").textContent = "invalid JSON: " + e.message;
+    return;
+  }
+  $("#bundle-preview-status").textContent = "previewing…";
+  try {
+    const res = await fetch("/api/bundle/preview", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({bundle}),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({error: res.statusText}));
+      $("#bundle-preview-status").textContent = "error: " + (err.error || res.status);
+      return;
+    }
+    const preview = await res.json();
+    BUNDLE_PREVIEW = {...preview, bundle};
+    BUNDLE_INCLUDE = new Set(preview.changes
+      .filter(c => c.status !== "identical")
+      .map(c => c.path));
+    renderBundlePreview();
+    $("#bundle-preview-status").textContent = "";
+  } catch (e) {
+    $("#bundle-preview-status").textContent = "error: " + e;
+  }
+});
+
+function renderBundlePreview() {
+  const p = BUNDLE_PREVIEW;
+  if (!p) { $("#bundle-preview").classList.add("hidden"); return; }
+  $("#bundle-preview").classList.remove("hidden");
+  const src = p.source || {};
+  const srcBits = [];
+  if (src.repo_name) srcBits.push(`from <strong>${escapeHtml(src.repo_name)}</strong>`);
+  if (p.note) srcBits.push(`note: <em>${escapeHtml(p.note)}</em>`);
+  $("#bundle-preview-source").innerHTML = srcBits.join(" · ") || "&nbsp;";
+  const t = p.totals;
+  $("#bundle-preview-totals").innerHTML = `
+    <span class="pill pass">${t.new} new</span>
+    <span class="pill fail">${t.conflict} conflict</span>
+    <span class="pill">${t.identical} identical</span>
+  `;
+  const rows = p.changes.map(c => {
+    const checked = BUNDLE_INCLUDE.has(c.path) ? "checked" : "";
+    const disabled = c.status === "identical" ? "disabled" : "";
+    const cls = c.status === "new" ? "pass"
+              : c.status === "conflict" ? "fail" : "";
+    return `<tr class="status-${c.status}">
+      <td><input type="checkbox" data-bundle-path="${escapeAttr(c.path)}" ${checked} ${disabled}></td>
+      <td><span class="pill ${cls}">${escapeHtml(c.status)}</span></td>
+      <td><code>${escapeHtml(c.kind)}</code></td>
+      <td><code>${escapeHtml(c.path)}</code></td>
+    </tr>`;
+  }).join("");
+  $("#bundle-changes").innerHTML = rows ||
+    '<tr><td colspan="4" class="muted">bundle has no items to apply</td></tr>';
+  $$('#bundle-changes input[type=checkbox]').forEach(cb => {
+    cb.addEventListener("change", () => {
+      const path = cb.dataset.bundlePath;
+      if (cb.checked) BUNDLE_INCLUDE.add(path);
+      else BUNDLE_INCLUDE.delete(path);
+    });
+  });
+}
+
+$("#bundle-toggle-all").addEventListener("change", e => {
+  if (!BUNDLE_PREVIEW) return;
+  const want = e.target.checked;
+  for (const c of BUNDLE_PREVIEW.changes) {
+    if (c.status === "identical") continue;
+    if (want) BUNDLE_INCLUDE.add(c.path);
+    else BUNDLE_INCLUDE.delete(c.path);
+  }
+  renderBundlePreview();
+});
+
+$("#bundle-apply").addEventListener("click", async () => {
+  if (!BUNDLE_PREVIEW) return;
+  const include = Array.from(BUNDLE_INCLUDE);
+  if (!include.length) {
+    $("#bundle-apply-status").textContent = "nothing selected";
+    return;
+  }
+  const on_conflict = $("#bundle-on-conflict").value;
+  $("#bundle-apply-status").textContent = "applying…";
+  try {
+    const r = await fetch("/api/bundle/import", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        bundle: BUNDLE_PREVIEW.bundle,
+        on_conflict, include,
+      }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({error: r.statusText}));
+      $("#bundle-apply-status").textContent = "error: " + (err.error || r.status);
+      return;
+    }
+    const report = await r.json();
+    $("#bundle-apply-status").textContent = "done ✓";
+    const totals = Object.entries(report.totals)
+      .map(([k, v]) => `<span class="pill">${escapeHtml(String(v))} ${escapeHtml(k)}</span>`)
+      .join(" ");
+    const rows = report.actions.map(a =>
+      `<tr><td><code>${escapeHtml(a.action)}</code></td><td><code>${escapeHtml(a.path)}</code></td></tr>`
+    ).join("");
+    $("#bundle-apply-report").innerHTML = `
+      <h4>Applied</h4>
+      <div>${totals}</div>
+      <table class="bundle-table">
+        <thead><tr><th>action</th><th>path</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    // Refresh dependent views so the user sees the imported config /
+    // scenarios immediately without a page reload.
+    await loadConfig();
+    await loadOnboarding().catch(() => {});
+  } catch (e) {
+    $("#bundle-apply-status").textContent = "error: " + e;
+  }
+});
+
+// Drag-and-drop a bundle JSON file onto the textarea.
+(function bundleDragAndDrop() {
+  const ta = $("#bundle-paste");
+  if (!ta) return;
+  ta.addEventListener("dragover", e => { e.preventDefault(); ta.classList.add("drop"); });
+  ta.addEventListener("dragleave", () => ta.classList.remove("drop"));
+  ta.addEventListener("drop", async e => {
+    e.preventDefault();
+    ta.classList.remove("drop");
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (!f) return;
+    ta.value = await f.text();
+  });
+})();
 
 // ----- RUN tab ----------------------------------------------------------
 

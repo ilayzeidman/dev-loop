@@ -24,6 +24,7 @@ Read endpoints
   GET  /api/schemas                      list of schema names
   GET  /api/schemas/<name>               raw schema JSON
   GET  /api/jobs/<id>                    background job status + log
+  GET  /api/bundle/export                JSON bundle of this repo's config
 
 Write endpoints
   POST /api/config/raw                   replace config.yaml
@@ -32,6 +33,8 @@ Write endpoints
   POST /api/scenarios/<name>/file/<fn>   write scenario file
   POST /api/scenarios                    create new scenario dir
   POST /api/implement                    launch loop in background
+  POST /api/bundle/preview               dry-run a bundle against this repo
+  POST /api/bundle/import                apply a bundle to this repo
 """
 
 from __future__ import annotations
@@ -49,6 +52,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from ..bundle import (
+    BundleError,
+    apply_bundle,
+    build_bundle,
+    bundle_to_json,
+    preview_apply,
+)
 from ..config import (
     CONFIG_DIR_NAME,
     CONFIG_FILE_NAME,
@@ -224,6 +234,7 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             if p == "/api/capabilities": self._api_list_capabilities(); return
             if p == "/api/playbooks": self._api_list_playbooks(); return
             if p == "/api/schemas": self._api_list_schemas(); return
+            if p == "/api/bundle/export": self._api_bundle_export(); return
             if p.startswith("/api/runs/"):
                 self._api_run_subroute(p[len("/api/runs/"):]); return
             if p.startswith("/api/scenarios/"):
@@ -243,6 +254,10 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 self._api_config_raw_post(self._read_body().decode("utf-8")); return
             if p == "/api/init":
                 self._api_init(self._read_json_body()); return
+            if p == "/api/bundle/preview":
+                self._api_bundle_preview(self._read_json_body()); return
+            if p == "/api/bundle/import":
+                self._api_bundle_import(self._read_json_body()); return
             if p == "/api/scenarios":
                 self._api_scenario_create(self._read_json_body()); return
             if p.startswith("/api/playbooks/"):
@@ -410,6 +425,75 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 sp = write_starter_scenario(r.scenarios_dir)
                 actions.append(f"installed starter scenario at {sp}")
             self._send_json(200, {"ok": True, "actions": actions})
+
+        # ----- bundle (share config between repos) -------------------
+
+        def _api_bundle_export(self) -> None:
+            """Return this repo's exportable bundle.
+
+            Served as ``application/json`` with a ``Content-Disposition``
+            header so a browser save-as drops it into a sensibly-named
+            file. The bundle is a pure JSON object.
+            """
+            bundle = build_bundle(repo)
+            body = bundle_to_json(bundle).encode("utf-8")
+            filename = f"{repo.name}-dev-loop-bundle.json"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header(
+                "Content-Disposition",
+                f'attachment; filename="{filename}"',
+            )
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _api_bundle_preview(self, body: Any) -> None:
+            """Dry-run an incoming bundle. Returns the diff vs. this repo.
+
+            Body: ``{"bundle": <bundle-object>}`` — the bundle as a parsed
+            JSON object so the client can paste, type or upload it.
+            """
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "body must be a JSON object"}); return
+            bundle = body.get("bundle")
+            if bundle is None:
+                self._send_json(400, {"error": "missing 'bundle' field"}); return
+            try:
+                preview = preview_apply(bundle, repo)
+            except BundleError as e:
+                self._send_json(400, {"error": str(e)}); return
+            self._send_json(200, preview)
+
+        def _api_bundle_import(self, body: Any) -> None:
+            """Apply an incoming bundle.
+
+            Body fields:
+              ``bundle``       — required, the parsed bundle object
+              ``on_conflict``  — ``skip`` (default), ``overwrite`` or
+                                 ``rename``
+              ``include``      — optional list of display paths to limit
+                                 the write to (per-item UI checkboxes)
+            """
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "body must be a JSON object"}); return
+            bundle = body.get("bundle")
+            if bundle is None:
+                self._send_json(400, {"error": "missing 'bundle' field"}); return
+            on_conflict = body.get("on_conflict") or "skip"
+            include = body.get("include")
+            if include is not None and not isinstance(include, list):
+                self._send_json(400, {"error": "'include' must be a list of strings"}); return
+            try:
+                report = apply_bundle(
+                    bundle, repo,
+                    on_conflict=on_conflict,
+                    include=include,
+                )
+            except BundleError as e:
+                self._send_json(400, {"error": str(e)}); return
+            self._send_json(200, report)
 
         # ----- runs ---------------------------------------------------
 

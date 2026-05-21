@@ -7,6 +7,8 @@ Subcommands:
   dev-loop config show                    # print the resolved config
   dev-loop schema validate <file> <schema>
   dev-loop replay <scenario>              # one-liner replay
+  dev-loop bundle export [--out FILE]     # pack config+scenarios+playbooks
+  dev-loop bundle import FILE [--apply]   # preview / apply a bundle
 """
 
 from __future__ import annotations
@@ -18,6 +20,14 @@ from pathlib import Path
 
 from . import schemas
 from .agents import create_runner
+from .bundle import (
+    BundleError,
+    apply_bundle,
+    build_bundle,
+    bundle_to_json,
+    preview_apply,
+    validate_bundle,
+)
 from .capabilities import load_default_registry
 from .config import (
     CONFIG_DIR_NAME,
@@ -78,6 +88,31 @@ def main(argv: list[str] | None = None) -> int:
     p_ui.add_argument("--no-browser", action="store_true",
                       help="don't try to open a browser window")
 
+    p_bundle = sub.add_parser(
+        "bundle",
+        help="export or import a portable config bundle "
+             "(config + scenarios + playbooks)",
+    )
+    b_sub = p_bundle.add_subparsers(dest="bundle_cmd", required=True)
+    p_b_export = b_sub.add_parser("export", help="write a bundle for this repo")
+    p_b_export.add_argument("--out", type=Path, default=None,
+                            help="write to this file instead of stdout")
+    p_b_export.add_argument("--note", default="",
+                            help="optional human-readable note shipped with the bundle")
+    p_b_import = b_sub.add_parser(
+        "import",
+        help="preview (default) or apply a bundle to this repo",
+    )
+    p_b_import.add_argument("file", type=Path, help="bundle JSON file")
+    p_b_import.add_argument("--apply", action="store_true",
+                            help="actually write files (default is dry-run preview)")
+    p_b_import.add_argument(
+        "--on-conflict",
+        choices=("skip", "overwrite", "rename"),
+        default="skip",
+        help="what to do when a destination file already differs",
+    )
+
     args = parser.parse_args(argv)
     repo = args.repo.resolve()
 
@@ -107,6 +142,15 @@ def main(argv: list[str] | None = None) -> int:
         serve(repo=repo, host=args.host, port=args.port,
               open_browser=not args.no_browser)
         return 0
+
+    if args.cmd == "bundle":
+        if args.bundle_cmd == "export":
+            return _cmd_bundle_export(repo, out=args.out, note=args.note)
+        if args.bundle_cmd == "import":
+            return _cmd_bundle_import(
+                repo, file=args.file,
+                apply=args.apply, on_conflict=args.on_conflict,
+            )
 
     if args.cmd == "replay":
         request = args.request
@@ -248,6 +292,69 @@ def _cmd_implement(
     print(f"ledger:            {result.ledger_dir}")
     print(f"report:            {result.report_path}")
     return 0 if result.final_status == "passed" else 1
+
+
+def _cmd_bundle_export(repo: Path, *, out: Path | None, note: str) -> int:
+    bundle = build_bundle(repo, note=note)
+    text = bundle_to_json(bundle)
+    if out is None:
+        sys.stdout.write(text)
+    else:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+        n_sc = len(bundle["scenarios"])
+        n_pb = len(bundle["playbooks"])
+        has_cfg = bool(bundle["config"]["yaml"])
+        print(f"wrote {out}")
+        print(f"  config:    {'yes' if has_cfg else 'no'}")
+        print(f"  scenarios: {n_sc}")
+        print(f"  playbooks: {n_pb}")
+        print("\nShare it with a teammate or import on a fresh clone:")
+        print(f"  dev-loop bundle import {out.name}")
+    return 0
+
+
+def _cmd_bundle_import(
+    repo: Path, *, file: Path, apply: bool, on_conflict: str,
+) -> int:
+    try:
+        raw = file.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        print(f"error: bundle file not found: {file}", file=sys.stderr)
+        return 2
+    try:
+        bundle = json.loads(raw)
+        validate_bundle(bundle)
+    except (json.JSONDecodeError, BundleError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    if not apply:
+        preview = preview_apply(bundle, repo)
+        print(f"Preview of {file} → {repo}:")
+        src = preview.get("source") or {}
+        if src.get("repo_name"):
+            print(f"  source: {src.get('repo_name')}")
+        if preview.get("note"):
+            print(f"  note:   {preview['note']}")
+        t = preview["totals"]
+        print(f"  {t['new']} new · {t['conflict']} conflict · {t['identical']} identical")
+        for c in preview["changes"]:
+            marker = {"new": "+", "conflict": "!", "identical": "="}.get(c["status"], "?")
+            print(f"  {marker} [{c['kind']}] {c['path']}")
+        print("\nNo files were written. Re-run with --apply to write.")
+        print(f"  dev-loop bundle import {file} --apply --on-conflict {on_conflict}")
+        return 0
+
+    report = apply_bundle(bundle, repo, on_conflict=on_conflict)
+    totals = report["totals"]
+    print(f"applied bundle to {repo}")
+    for action, count in sorted(totals.items()):
+        print(f"  {count} {action}")
+    for a in report["actions"]:
+        if a["action"] not in ("identical",):
+            print(f"  {a['action']:>10}  {a['path']}")
+    return 0
 
 
 # helpers ---------------------------------------------------------------

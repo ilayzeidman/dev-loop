@@ -31,6 +31,7 @@
           <li><a href="#" data-builder="playbooks">Playbooks</a></li>
           <li><a href="#" data-builder="schemas">Schemas</a></li>
           <li><a href="#" data-builder="scenarios">Scenarios</a></li>
+          <li><a href="#" data-builder="share">Share &amp; reuse</a></li>
         </ul>
       </aside>
       <div class="content">
@@ -151,6 +152,79 @@
             <button id="sc-new">+ new</button>
           </div>
           <div id="sc-detail"></div>
+        </div>
+
+        <div class="panel hidden" id="builder-share">
+          <h2>Share &amp; reuse this setup</h2>
+          <p class="muted">
+            Pack <code>.dev-loop/config.yaml</code>, your scenarios, and any
+            edited playbooks into a single portable JSON file. Drop that file
+            on a teammate, paste it into a fresh clone, and you're up and
+            running in one click.
+          </p>
+
+          <section class="share-section">
+            <h3>Export this repo</h3>
+            <p class="muted">
+              Builds a snapshot of every config knob that's worth carrying
+              between repos. Run artifacts and built-in defaults are skipped.
+            </p>
+            <div class="row">
+              <input id="bundle-note" type="text"
+                placeholder="optional note (e.g. 'tuned for GPU triage')"
+                style="flex:1;min-width:280px">
+              <button id="bundle-download">Download bundle</button>
+              <button id="bundle-copy" class="secondary">Copy JSON</button>
+              <span id="bundle-export-status" class="muted"></span>
+            </div>
+            <details>
+              <summary class="muted">What's inside?</summary>
+              <ul id="bundle-export-summary" class="muted"></ul>
+            </details>
+          </section>
+
+          <section class="share-section">
+            <h3>Import a bundle into this repo</h3>
+            <p class="muted">
+              Paste a bundle JSON, or drop a file. We'll show you exactly what
+              would change — new files, conflicts, and identical matches —
+              before anything is written.
+            </p>
+            <div class="row">
+              <input id="bundle-file-input" type="file" accept="application/json,.json">
+              <button id="bundle-preview-btn">Preview</button>
+              <button id="bundle-clear" class="secondary">Clear</button>
+              <span id="bundle-preview-status" class="muted"></span>
+            </div>
+            <textarea id="bundle-paste" rows="6" spellcheck="false"
+              placeholder='Paste a bundle JSON here (looks like {"format": "dev-loop-bundle", ...})'></textarea>
+
+            <div id="bundle-preview" class="hidden">
+              <div class="bundle-source muted" id="bundle-preview-source"></div>
+              <div class="bundle-totals" id="bundle-preview-totals"></div>
+              <table class="bundle-table">
+                <thead><tr>
+                  <th><input type="checkbox" id="bundle-toggle-all" checked></th>
+                  <th>status</th>
+                  <th>kind</th>
+                  <th>path</th>
+                </tr></thead>
+                <tbody id="bundle-changes"></tbody>
+              </table>
+              <div class="row">
+                <label>On conflict:
+                  <select id="bundle-on-conflict">
+                    <option value="skip">skip (keep destination)</option>
+                    <option value="overwrite">overwrite</option>
+                    <option value="rename">rename (.imported suffix)</option>
+                  </select>
+                </label>
+                <button id="bundle-apply">Apply selected</button>
+                <span id="bundle-apply-status" class="muted"></span>
+              </div>
+              <div id="bundle-apply-report"></div>
+            </div>
+          </section>
         </div>
 
       </div>

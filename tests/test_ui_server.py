@@ -355,6 +355,106 @@ def test_runs_list_surfaces_goal_and_duration(tmp_path: Path):
         assert r["iterations"] == 1
 
 
+def test_bundle_export_endpoint_returns_valid_bundle(tmp_path: Path):
+    """``GET /api/bundle/export`` returns a parseable bundle whose shape
+    matches what the importer expects."""
+    (tmp_path / ".dev-loop").mkdir()
+    (tmp_path / ".dev-loop" / "config.yaml").write_text(
+        "default_provider: claude\n", encoding="utf-8")
+    (tmp_path / "scenarios" / "foo-001").mkdir(parents=True)
+    (tmp_path / "scenarios" / "foo-001" / "task_request.md").write_text(
+        "do x\n", encoding="utf-8")
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/bundle/export")
+        assert status == 200
+        bundle = json.loads(body)
+        assert bundle["format"] == "dev-loop-bundle"
+        assert bundle["format_version"] >= 1
+        assert bundle["config"]["yaml"].startswith("default_provider")
+        names = [s["name"] for s in bundle["scenarios"]]
+        assert "foo-001" in names
+
+
+def test_bundle_preview_then_import_roundtrip(tmp_path: Path):
+    """End-to-end: build a bundle from repo A, then preview+apply it
+    against repo B through the HTTP endpoints."""
+    repo_a = tmp_path / "a"
+    repo_b = tmp_path / "b"
+    repo_a.mkdir(); repo_b.mkdir()
+    (repo_a / ".dev-loop").mkdir()
+    (repo_a / ".dev-loop" / "config.yaml").write_text(
+        "default_provider: claude\n", encoding="utf-8")
+    (repo_a / "scenarios" / "foo").mkdir(parents=True)
+    (repo_a / "scenarios" / "foo" / "task_request.md").write_text(
+        "hi\n", encoding="utf-8")
+
+    # Export via repo A's UI server.
+    with _server(repo_a) as (port_a, _):
+        _, body = _get(port_a, "/api/bundle/export")
+        bundle = json.loads(body)
+
+    # Preview + import against repo B.
+    with _server(repo_b) as (port_b, _):
+        status, preview = _post_json(port_b, "/api/bundle/preview",
+                                     {"bundle": bundle})
+        assert status == 200
+        # Every change is new in the empty repo B.
+        statuses = {c["status"] for c in preview["changes"]}
+        assert "new" in statuses
+
+        status, report = _post_json(port_b, "/api/bundle/import",
+                                    {"bundle": bundle, "on_conflict": "skip"})
+        assert status == 200
+        # At least one file got written.
+        assert any(a["action"] == "wrote" for a in report["actions"])
+        assert (repo_b / "scenarios" / "foo" / "task_request.md").read_text(
+            encoding="utf-8") == "hi\n"
+        assert (repo_b / ".dev-loop" / "config.yaml").read_text(
+            encoding="utf-8") == "default_provider: claude\n"
+
+
+def test_bundle_preview_rejects_malformed_bundle(tmp_path: Path):
+    """A garbage bundle returns 400, not 500."""
+    import urllib.error
+    with _server(tmp_path) as (port, _):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/bundle/preview",
+            method="POST",
+            data=json.dumps({"bundle": {"format": "nope"}}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=2)
+            raise AssertionError("expected HTTPError")
+        except urllib.error.HTTPError as e:
+            assert e.code == 400, e.code
+            err = json.loads(e.read().decode("utf-8"))
+            assert "format" in err["error"].lower()
+
+
+def test_bundle_import_respects_include_filter(tmp_path: Path):
+    """An ``include`` list narrows the write to listed display paths."""
+    with _server(tmp_path) as (port, _):
+        bundle = {
+            "format": "dev-loop-bundle", "format_version": 1,
+            "config": {"present": True, "yaml": "default_provider: claude\n"},
+            "scenarios": [{
+                "name": "foo",
+                "files": {"a.txt": "A\n", "b.txt": "B\n"},
+            }],
+            "playbooks": [],
+        }
+        status, report = _post_json(port, "/api/bundle/import", {
+            "bundle": bundle,
+            "include": ["scenarios/foo/a.txt"],
+        })
+        assert status == 200
+        actions = {a["path"]: a["action"] for a in report["actions"]}
+        assert actions == {"scenarios/foo/a.txt": "wrote"}
+        assert not (tmp_path / "scenarios" / "foo" / "b.txt").exists()
+        assert not (tmp_path / ".dev-loop" / "config.yaml").exists()
+
+
 def test_scenario_create_blocks_dotdot_name(tmp_path: Path):
     """The create endpoint must also reject ``..`` (its existing check did
     via ``startswith('.')``; this pins that behaviour)."""

@@ -71,6 +71,51 @@ def test_implement_unknown_provider_clean_error(tmp_path: Path, capsys):
     assert "traceback" not in captured.err.lower()
 
 
+def test_bundle_export_and_import_via_cli(tmp_path: Path, capsys):
+    """``dev-loop bundle export`` + ``import`` is the headless story for
+    sharing a tuned setup between repos."""
+    repo_a = tmp_path / "a"
+    repo_b = tmp_path / "b"
+    repo_a.mkdir(); repo_b.mkdir()
+    cli.main(["--repo", str(repo_a), "init", "--starter"])
+    capsys.readouterr()  # discard init output
+
+    out_file = tmp_path / "bundle.json"
+    rc = cli.main(["--repo", str(repo_a), "bundle", "export",
+                   "--out", str(out_file), "--note", "preset-1"])
+    assert rc == 0
+    assert out_file.exists()
+    data = json.loads(out_file.read_text(encoding="utf-8"))
+    assert data["format"] == "dev-loop-bundle"
+    assert data["note"] == "preset-1"
+    assert any(s["name"] == "hello-dev-loop" for s in data["scenarios"])
+
+    # Preview into the empty repo (no writes).
+    capsys.readouterr()
+    rc = cli.main(["--repo", str(repo_b), "bundle", "import", str(out_file)])
+    assert rc == 0
+    preview_out = capsys.readouterr().out
+    assert "Preview" in preview_out
+    assert "new" in preview_out
+    # No writes yet.
+    assert not (repo_b / ".dev-loop" / "config.yaml").exists()
+
+    # Apply.
+    rc = cli.main(["--repo", str(repo_b), "bundle", "import",
+                   str(out_file), "--apply"])
+    assert rc == 0
+    assert (repo_b / ".dev-loop" / "config.yaml").exists()
+    assert (repo_b / "scenarios" / "hello-dev-loop" / "task_request.md").exists()
+
+
+def test_bundle_import_missing_file(tmp_path: Path, capsys):
+    rc = cli.main(["--repo", str(tmp_path), "bundle", "import",
+                   str(tmp_path / "nope.json")])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "not found" in err.lower()
+
+
 def test_schema_validate_ok(tmp_path: Path):
     obj = {
         "type": "task_contract",
