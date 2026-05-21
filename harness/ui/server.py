@@ -84,8 +84,8 @@ from ..config import (
     write_starter_scenario,
 )
 from ..playbooks import PLAYBOOK_DIR, repo_playbook_dir
-from ..runs import _diff_deltas as _runs_diff_deltas
 from ..runs import audit_rollup as _runs_audit_rollup
+from ..runs import diff_deltas as _runs_diff_deltas
 from ..runs import show_run as _runs_show_run
 from ..schemas import SCHEMA_DIR
 from ..scenarios import (
@@ -1394,7 +1394,7 @@ def _compare_deltas(a: dict[str, Any] | None,
                     b: dict[str, Any] | None) -> dict[str, Any]:
     """High-level summary of what changed from ``a`` to ``b``.
 
-    Delegates to :func:`harness.runs._diff_deltas` so CLI ``runs diff``
+    Delegates to :func:`harness.runs.diff_deltas` so CLI ``runs diff``
     and the Analyze tab compare view stay in lock-step. Kept as a
     module-level name because tests and any future surface importing it
     should not need to know the implementation moved.

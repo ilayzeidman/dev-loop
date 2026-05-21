@@ -204,11 +204,24 @@ def diff_runs(runs_dir: Path, a: str, b: str) -> dict[str, Any]:
     if b_summary is not None:
         b_summary = {**b_summary, "audit": audit_rollup(Path(b_summary["path"]))}
     return {"a": a_summary, "b": b_summary,
-            "deltas": _diff_deltas(a_summary, b_summary)}
+            "deltas": diff_deltas(a_summary, b_summary)}
 
 
-def _diff_deltas(a: dict[str, Any] | None,
-                 b: dict[str, Any] | None) -> dict[str, Any]:
+def diff_deltas(a: dict[str, Any] | None,
+                b: dict[str, Any] | None) -> dict[str, Any]:
+    """Pairwise digest of two ``show_run``-shaped summaries.
+
+    Returns ``{"both_present": False}`` when either side is missing so
+    callers can decide whether to render a partial diff or error. When
+    both sides are present the result includes per-field equality flags
+    (``same_goal``, ``same_scenario``, ``same_final_status``), iteration
+    bookkeeping (``iteration_count_delta``, ``iteration_status_agreement``,
+    ``iteration_status_compared``, ``first_diverging_iteration``),
+    file-set membership (``files_only_a``, ``files_only_b``,
+    ``files_both``), and audit/duration deltas. Pure — no I/O — so the
+    CLI ``runs diff`` and Analyze tab compare endpoint share one
+    implementation.
+    """
     if a is None or b is None:
         return {"both_present": False}
     iters_a = a.get("iterations") or []
