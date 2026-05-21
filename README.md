@@ -60,6 +60,14 @@ Every field has a default. Override only what you need. See
 to lint the file (catches typos, out-of-range policy values, and
 unknown providers before they reach the loop).
 
+Stuck? `dev-loop doctor` is a one-shot setup check that scans the
+repo for the most common breakage classes (missing/invalid config,
+missing `.gitignore` entry, unwritable `runs_dir`, empty
+`scenarios_dir`, default provider whose CLI isn't on PATH) and
+prints each issue with a one-line fix hint. It exits non-zero on
+errors (or warnings under `--strict`), so it's safe to gate CI on.
+Pair it with `--json` for machine-readable output.
+
 ## Run ledger
 
 ```

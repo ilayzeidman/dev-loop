@@ -3,6 +3,7 @@
 Subcommands:
 
   dev-loop init                           # scaffold .dev-loop/config.yaml
+  dev-loop doctor                         # one-shot setup diagnostics
   dev-loop implement --request "..." ...  # run the autonomous loop
   dev-loop config show                    # print the resolved config
   dev-loop config validate                # lint .dev-loop/config.yaml
@@ -43,6 +44,13 @@ from .config import (
     write_default_config,
     write_starter_scenario,
 )
+from .doctor import (
+    doctor_exit_code,
+    format_checks,
+    format_summary,
+    run_doctor,
+    to_json as doctor_to_json,
+)
 from .orchestrator import Orchestrator, OrchestratorConfig
 from .runs import diff_runs, list_runs, show_run
 
@@ -80,6 +88,20 @@ def main(argv: list[str] | None = None) -> int:
         help="lint .dev-loop/config.yaml (typos, type errors, unusual values)",
     )
     p_cfg_val.add_argument(
+        "--strict", action="store_true",
+        help="exit non-zero on warnings as well as errors",
+    )
+
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="one-shot setup diagnostics (config, gitignore, runs dir, "
+             "scenarios, provider CLI, ledger health)",
+    )
+    p_doctor.add_argument(
+        "--json", action="store_true",
+        help="emit machine-readable JSON instead of a human-readable report",
+    )
+    p_doctor.add_argument(
         "--strict", action="store_true",
         help="exit non-zero on warnings as well as errors",
     )
@@ -200,6 +222,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "init":
         return _cmd_init(repo, force=args.force, starter=args.starter)
 
+    if args.cmd == "doctor":
+        return _cmd_doctor(
+            repo, explicit=args.config,
+            as_json=args.json, strict=args.strict,
+        )
+
     if args.cmd == "config":
         if args.cfg_cmd == "validate":
             return _cmd_config_validate(
@@ -292,7 +320,7 @@ def _cmd_init(repo: Path, *, force: bool, starter: bool = False) -> int:
     if starter_path is not None:
         print(f"  starter scenario installed: {starter_path}")
     print("\nNext steps:")
-    print("  dev-loop config show")
+    print("  dev-loop doctor                # confirm the repo is ready")
     if starter_path is not None:
         print(f"  dev-loop replay {STARTER_SCENARIO_NAME}")
     else:
@@ -387,6 +415,33 @@ def _cmd_config_validate(
     if strict and warnings:
         return 1
     return 0
+
+
+def _cmd_doctor(
+    repo: Path, *, explicit: Path | None, as_json: bool, strict: bool,
+) -> int:
+    """``dev-loop doctor`` — one-shot setup diagnostics.
+
+    Designed as the very first command a user runs after ``init`` to
+    confirm the harness is wired up correctly, and as the first command
+    they run when something feels off ("why does ``implement`` fail?").
+
+    Severity → exit code is symmetric with ``config validate``: errors
+    always fail, warnings fail only under ``--strict``.
+    """
+    checks = run_doctor(repo, explicit_config=explicit)
+    rc = doctor_exit_code(checks, strict=strict)
+
+    if as_json:
+        print(doctor_to_json(repo, checks, exit_code=rc))
+        return rc
+
+    print(f"dev-loop doctor — {repo}")
+    print(format_checks(checks))
+    print(f"\nsummary: {format_summary(checks)}")
+    if rc != 0:
+        print("\nfix the items above (or pass --strict to gate on warnings).")
+    return rc
 
 
 def _cmd_runs_ls(
