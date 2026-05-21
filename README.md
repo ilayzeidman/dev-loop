@@ -66,7 +66,10 @@ missing `.gitignore` entry, unwritable `runs_dir`, empty
 `scenarios_dir`, default provider whose CLI isn't on PATH) and
 prints each issue with a one-line fix hint. It exits non-zero on
 errors (or warnings under `--strict`), so it's safe to gate CI on.
-Pair it with `--json` for machine-readable output.
+Pair it with `--json` for machine-readable output. The same checks
+are embedded in the web UI's first-run onboarding panel (and exposed
+at `GET /api/doctor`) so you see identical diagnostics in either
+surface.
 
 ## Run ledger
 

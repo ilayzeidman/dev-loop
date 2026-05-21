@@ -96,10 +96,61 @@ function renderOnboarding() {
     ? "Run the bundled hello-dev-loop scenario end-to-end"
     : "Install the starter scenario first";
 
+  renderOnboardingDoctor(o.diagnostics);
+
   // Only show the panel while there's something useful to do or to
   // celebrate; once the user has runs recorded we get out of the way.
   const shouldShow = !o.is_complete || o.run_count === 0;
   panel.classList.toggle("hidden", !shouldShow);
+}
+
+// Render the doctor block. `diag` is `{checks: [...], summary: {...}}` or
+// nullish (older servers). Mirrors `dev-loop doctor` so the UI and CLI
+// agree byte-for-byte on what's broken.
+function renderOnboardingDoctor(diag) {
+  const wrap = $("#onboarding-doctor-wrap");
+  const list = $("#onboarding-doctor-list");
+  const summaryEl = $("#onboarding-doctor-summary");
+  if (!diag || !Array.isArray(diag.checks)) {
+    wrap.classList.add("hidden");
+    return;
+  }
+  wrap.classList.remove("hidden");
+  const s = diag.summary || {};
+  const ok = s.ok || 0, warn = s.warning || 0, err = s.error || 0;
+  const tone = err ? "err" : (warn ? "warn" : "ok");
+  summaryEl.className = `doctor-pill doctor-pill-${tone}`;
+  summaryEl.textContent = err
+    ? `${err} error${err === 1 ? "" : "s"}, ${warn} warn, ${ok} ok`
+    : warn
+      ? `${warn} warning${warn === 1 ? "" : "s"}, ${ok} ok`
+      : `all ${ok} check${ok === 1 ? "" : "s"} ok`;
+  list.innerHTML = diag.checks.map(c => `
+    <li class="doctor-check doctor-${escapeHtml(c.level)}">
+      <span class="doctor-mark" aria-hidden="true">${{
+        "ok": "✓", "warning": "!", "error": "x",
+      }[c.level] || "?"}</span>
+      <span class="doctor-body">
+        <span class="doctor-label">${escapeHtml(c.label)}</span>
+        <span class="doctor-msg">${escapeHtml(c.message)}</span>
+        ${c.hint ? `<span class="doctor-hint">hint: ${escapeHtml(c.hint)}</span>` : ""}
+      </span>
+    </li>`).join("");
+  // Auto-open the details when something needs attention so the user
+  // doesn't have to hunt for the warning.
+  if (err || warn) wrap.open = true;
+}
+
+async function refreshOnboardingDoctor() {
+  const status = $("#onboarding-doctor-status");
+  status.textContent = "checking…";
+  try {
+    const diag = await getJSON("/api/doctor");
+    renderOnboardingDoctor(diag);
+    status.textContent = "";
+  } catch (e) {
+    status.textContent = "error: " + e;
+  }
 }
 
 async function runOnboardingInit() {
@@ -138,6 +189,7 @@ async function runOnboardingDemo() {
 
 $("#onboarding-init").addEventListener("click", runOnboardingInit);
 $("#onboarding-demo").addEventListener("click", runOnboardingDemo);
+$("#onboarding-doctor-refresh").addEventListener("click", refreshOnboardingDoctor);
 
 (async () => {
   try { await loadConfig(); }

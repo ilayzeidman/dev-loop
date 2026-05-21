@@ -6,6 +6,7 @@ Read endpoints
   GET  /api/config                       resolved config
   GET  /api/config/raw                   raw config.yaml text
   GET  /api/onboarding                   first-run setup checklist
+  GET  /api/doctor                       repo diagnostics (delegates to dev-loop doctor)
   GET  /api/runs                         list of task runs + active jobs
   GET  /api/runs/trends                  per-goal trend buckets + sparkline data
   GET  /api/runs/<task-id>               task manifest
@@ -83,6 +84,8 @@ from ..config import (
     write_default_config,
     write_starter_scenario,
 )
+from ..doctor import doctor_summary as _doctor_summary
+from ..doctor import run_doctor as _run_doctor
 from ..playbooks import PLAYBOOK_DIR, repo_playbook_dir
 from ..runs import audit_rollup as _runs_audit_rollup
 from ..runs import diff_deltas as _runs_diff_deltas
@@ -190,6 +193,30 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _doctor_payload(repo: Path) -> dict[str, Any]:
+    """Shape ``dev-loop doctor`` results for the UI.
+
+    Same fields the CLI's ``--json`` mode emits, minus ``exit_code`` (a
+    process-level concept). If the probe itself crashes we surface a
+    single error-level check so the onboarding panel still renders.
+    """
+    try:
+        checks = _run_doctor(repo)
+    except Exception as e:  # noqa: BLE001
+        return {
+            "checks": [{
+                "level": "error",
+                "label": "doctor",
+                "message": f"diagnostics failed: {type(e).__name__}: {e}",
+            }],
+            "summary": {"ok": 0, "warning": 0, "error": 1},
+        }
+    return {
+        "checks": [c.to_dict() for c in checks],
+        "summary": _doctor_summary(checks),
+    }
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -254,6 +281,7 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             if p == "/api/config": self._api_config(); return
             if p == "/api/config/raw": self._api_config_raw(); return
             if p == "/api/onboarding": self._api_onboarding(); return
+            if p == "/api/doctor": self._api_doctor(); return
             if p == "/api/runs": self._api_list_runs(); return
             if p == "/api/runs/trends": self._api_runs_trends(); return
             if p == "/api/scenarios": self._api_list_scenarios(); return
@@ -524,6 +552,7 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 },
             ]
             is_complete = all(s["done"] for s in steps)
+            diagnostics = _doctor_payload(repo)
             self._send_json(200, {
                 "repo": str(repo),
                 "repo_name": repo.name,
@@ -536,7 +565,12 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 "default_provider": r.default_provider,
                 "is_complete": is_complete,
                 "steps": steps,
+                "diagnostics": diagnostics,
             })
+
+        def _api_doctor(self) -> None:
+            """Detailed setup diagnostics, mirroring ``dev-loop doctor``."""
+            self._send_json(200, _doctor_payload(repo))
 
         def _api_init(self, body: Any) -> None:
             """One-click setup. Idempotent.

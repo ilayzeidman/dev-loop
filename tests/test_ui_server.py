@@ -250,6 +250,38 @@ def test_onboarding_reports_unconfigured_state(tmp_path: Path):
         assert all(s["done"] is False for s in data["steps"])
 
 
+def test_onboarding_embeds_doctor_diagnostics(tmp_path: Path):
+    """The first-run panel should include the same checks `dev-loop doctor`
+    emits, so the UI and CLI never disagree on what's broken."""
+    with _server(tmp_path) as (port, _):
+        _, body = _get(port, "/api/onboarding")
+        data = json.loads(body)
+        diag = data.get("diagnostics")
+        assert isinstance(diag, dict), diag
+        labels = [c["label"] for c in diag["checks"]]
+        # The doctor's stable label set must be present and ordered.
+        assert labels[:3] == ["repo_dir", "config_file", "git_repo"]
+        # Every check has level + message; unconfigured repo has warnings.
+        for c in diag["checks"]:
+            assert c["level"] in {"ok", "warning", "error"}
+            assert c["message"]
+        s = diag["summary"]
+        assert {"ok", "warning", "error"} <= set(s)
+        assert s["warning"] >= 1, diag
+
+
+def test_doctor_endpoint_matches_doctor_module(tmp_path: Path):
+    """GET /api/doctor must delegate to harness.doctor (single source of truth)."""
+    from harness.doctor import run_doctor
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/doctor")
+        assert status == 200
+        data = json.loads(body)
+        ui_labels = [c["label"] for c in data["checks"]]
+        cli_labels = [c.label for c in run_doctor(tmp_path)]
+        assert ui_labels == cli_labels
+
+
 def test_init_endpoint_writes_config_and_starter(tmp_path: Path):
     """POST /api/init should scaffold config, gitignore, and the starter."""
     with _server(tmp_path) as (port, _):
