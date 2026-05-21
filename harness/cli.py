@@ -12,6 +12,9 @@ Subcommands:
   dev-loop runs ls                        # list runs in the ledger
   dev-loop runs show <task-id>            # summarize one run
   dev-loop runs diff <a> <b>              # compare two runs (CLI mirror of UI)
+  dev-loop scenarios ls                   # list replay scenarios (lint status)
+  dev-loop scenarios show <name>          # detail view of one scenario
+  dev-loop scenarios validate [name]      # lint one or all scenarios
   dev-loop bundle export [--out FILE]     # pack config+scenarios+playbooks
   dev-loop bundle import FILE [--apply]   # preview / apply a bundle
 """
@@ -53,6 +56,7 @@ from .doctor import (
 )
 from .orchestrator import Orchestrator, OrchestratorConfig
 from .runs import diff_runs, list_runs, show_run
+from .scenarios import list_scenarios, show_scenario
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -166,6 +170,42 @@ def main(argv: list[str] | None = None) -> int:
         help="emit JSON instead of a human-readable diff",
     )
 
+    p_scn = sub.add_parser(
+        "scenarios",
+        help="inspect or lint replay scenarios (list / show / validate)",
+    )
+    scn_sub = p_scn.add_subparsers(dest="scenarios_cmd", required=True)
+    p_scn_ls = scn_sub.add_parser("ls", help="list scenarios in scenarios_dir")
+    p_scn_ls.add_argument(
+        "--json", action="store_true",
+        help="emit JSON instead of a human-readable table",
+    )
+    p_scn_show = scn_sub.add_parser(
+        "show", help="print a detailed summary of one scenario",
+    )
+    p_scn_show.add_argument("name", help="scenario directory name")
+    p_scn_show.add_argument(
+        "--json", action="store_true",
+        help="emit JSON instead of a human-readable summary",
+    )
+    p_scn_val = scn_sub.add_parser(
+        "validate",
+        help="lint one or all scenarios (mirrors the UI's structured form "
+             "validator; safe to gate CI on)",
+    )
+    p_scn_val.add_argument(
+        "name", nargs="?",
+        help="scenario name (omit to validate every scenario in scenarios_dir)",
+    )
+    p_scn_val.add_argument(
+        "--strict", action="store_true",
+        help="exit non-zero on warnings as well as errors",
+    )
+    p_scn_val.add_argument(
+        "--json", action="store_true",
+        help="emit machine-readable JSON instead of a human-readable report",
+    )
+
     p_ui = sub.add_parser("ui", help="launch the local web UI")
     p_ui.add_argument("--host", default="127.0.0.1")
     p_ui.add_argument("--port", type=int, default=8765)
@@ -254,6 +294,21 @@ def main(argv: list[str] | None = None) -> int:
         if args.runs_cmd == "diff":
             return _cmd_runs_diff(
                 resolved.runs_dir, a=args.a, b=args.b, as_json=args.json,
+            )
+
+    if args.cmd == "scenarios":
+        if args.scenarios_cmd == "ls":
+            return _cmd_scenarios_ls(
+                resolved.scenarios_dir, as_json=args.json,
+            )
+        if args.scenarios_cmd == "show":
+            return _cmd_scenarios_show(
+                resolved.scenarios_dir, name=args.name, as_json=args.json,
+            )
+        if args.scenarios_cmd == "validate":
+            return _cmd_scenarios_validate(
+                resolved.scenarios_dir,
+                name=args.name, strict=args.strict, as_json=args.json,
             )
 
     if args.cmd == "implement":
@@ -720,6 +775,208 @@ def _fmt_duration(seconds: int | None) -> str:
 def _truncate(s: str, n: int) -> str:
     s = s.strip().replace("\n", " ")
     return s if len(s) <= n else s[: max(0, n - 1)] + "…"
+
+
+def _cmd_scenarios_ls(scenarios_dir: Path, *, as_json: bool) -> int:
+    rows = list_scenarios(scenarios_dir)
+
+    if as_json:
+        print(json.dumps(
+            {"scenarios_dir": str(scenarios_dir), "scenarios": rows},
+            indent=2,
+        ))
+        return 0
+
+    if not rows:
+        if not scenarios_dir.exists():
+            print(f"no scenarios — scenarios_dir does not exist: {scenarios_dir}")
+            print("  run `dev-loop init --starter` to install the bundled demo.")
+        else:
+            print(f"no scenarios found in {scenarios_dir}")
+        return 0
+
+    headers = ("NAME", "LINT", "E2E", "DURATION", "FILES", "SUITE", "GOAL")
+    table = [headers]
+    for r in rows:
+        if r.get("n_errors"):
+            lint = f"{r['n_errors']}E"
+            if r.get("n_warnings"):
+                lint += f"/{r['n_warnings']}W"
+        elif r.get("n_warnings"):
+            lint = f"{r['n_warnings']}W"
+        else:
+            lint = "ok"
+        table.append((
+            r["name"],
+            lint,
+            r.get("e2e_status") or "-",
+            _fmt_duration(r.get("duration_seconds")),
+            str(r.get("file_count") or 0),
+            _truncate(r.get("e2e_suite") or "-", 24),
+            _truncate(r.get("goal") or "-", 48),
+        ))
+    widths = [max(len(row[i]) for row in table) for i in range(len(headers))]
+    for row in table:
+        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip())
+    return 0
+
+
+def _cmd_scenarios_show(
+    scenarios_dir: Path, *, name: str, as_json: bool,
+) -> int:
+    detail = show_scenario(scenarios_dir, name)
+    if detail is None:
+        print(f"error: scenario not found: {name}", file=sys.stderr)
+        print(f"  looked under: {scenarios_dir / name}", file=sys.stderr)
+        print("  try `dev-loop scenarios ls` to see available scenarios.",
+              file=sys.stderr)
+        return 1
+
+    if as_json:
+        print(json.dumps(detail, indent=2))
+        return 0
+
+    print(f"name:          {detail['name']}")
+    print(f"path:          {detail['path']}")
+    print(f"goal:          {detail.get('goal') or '-'}")
+    print(f"e2e_status:    {detail.get('e2e_status') or '-'}")
+    print(f"e2e_suite:     {detail.get('e2e_suite') or '-'}")
+    print(f"duration:      {_fmt_duration(detail.get('duration_seconds'))}")
+    print(f"files:         {detail.get('file_count') or 0}")
+
+    issues = detail.get("issues") or []
+    errors = [i for i in issues if i["level"] == "error"]
+    warnings = [i for i in issues if i["level"] == "warning"]
+    if not issues:
+        print("lint:          ok (no issues)")
+    else:
+        bits = []
+        if errors:
+            bits.append(f"{len(errors)} error{'s' if len(errors) != 1 else ''}")
+        if warnings:
+            bits.append(
+                f"{len(warnings)} warning{'s' if len(warnings) != 1 else ''}"
+            )
+        print(f"lint:          {', '.join(bits)}")
+        for it in errors:
+            print(f"  error   {it['field']}: {it['message']}")
+        for it in warnings:
+            print(f"  warning {it['field']}: {it['message']}")
+
+    others = detail.get("other_files") or []
+    if others:
+        print(f"\nother files ({len(others)}):")
+        for f in others:
+            print(f"  {f}")
+
+    req = (detail.get("task_request") or "").strip()
+    if req:
+        print("\ntask_request.md (first 12 lines):")
+        for line in req.splitlines()[:12]:
+            print(f"  {line}")
+    return 0
+
+
+def _cmd_scenarios_validate(
+    scenarios_dir: Path, *, name: str | None, strict: bool, as_json: bool,
+) -> int:
+    """Lint one or every scenario under ``scenarios_dir``.
+
+    Exit code: 0 if every scenario is clean (or only warnings without
+    ``--strict``); 1 if any scenario has errors (or any issues under
+    ``--strict``); 2 if a named scenario is missing.
+    """
+    if name is not None:
+        detail = show_scenario(scenarios_dir, name)
+        if detail is None:
+            print(f"error: scenario not found: {name}", file=sys.stderr)
+            return 2
+        targets = [detail]
+    else:
+        if not scenarios_dir.exists():
+            msg = f"no scenarios — scenarios_dir does not exist: {scenarios_dir}"
+            if as_json:
+                print(json.dumps({
+                    "scenarios_dir": str(scenarios_dir),
+                    "scenarios": [],
+                    "totals": {"errors": 0, "warnings": 0, "clean": 0, "scenarios": 0},
+                }, indent=2))
+            else:
+                print(msg)
+            return 0
+        targets = [
+            show_scenario(scenarios_dir, row["name"])
+            for row in list_scenarios(scenarios_dir)
+        ]
+        targets = [t for t in targets if t is not None]
+
+    total_errors = sum(
+        sum(1 for i in t.get("issues") or [] if i["level"] == "error")
+        for t in targets
+    )
+    total_warnings = sum(
+        sum(1 for i in t.get("issues") or [] if i["level"] == "warning")
+        for t in targets
+    )
+    clean = sum(
+        1 for t in targets
+        if not any(i["level"] == "error" for i in t.get("issues") or [])
+    )
+
+    if as_json:
+        print(json.dumps({
+            "scenarios_dir": str(scenarios_dir),
+            "scenarios": [
+                {
+                    "name": t["name"],
+                    "path": t["path"],
+                    "issues": t.get("issues") or [],
+                    "valid": not any(
+                        i["level"] == "error" for i in t.get("issues") or []
+                    ),
+                }
+                for t in targets
+            ],
+            "totals": {
+                "errors": total_errors,
+                "warnings": total_warnings,
+                "clean": clean,
+                "scenarios": len(targets),
+            },
+        }, indent=2))
+    else:
+        if not targets:
+            print(f"no scenarios found in {scenarios_dir}")
+            return 0
+        for t in targets:
+            issues = t.get("issues") or []
+            errs = [i for i in issues if i["level"] == "error"]
+            warns = [i for i in issues if i["level"] == "warning"]
+            if not issues:
+                print(f"{t['name']}: ok")
+                continue
+            bits = []
+            if errs:
+                bits.append(f"{len(errs)} error{'s' if len(errs) != 1 else ''}")
+            if warns:
+                bits.append(f"{len(warns)} warning{'s' if len(warns) != 1 else ''}")
+            print(f"{t['name']}: {', '.join(bits)}")
+            for it in errs:
+                print(f"  error   {it['field']}: {it['message']}")
+            for it in warns:
+                print(f"  warning {it['field']}: {it['message']}")
+        print(
+            f"\n{len(targets)} scenario{'s' if len(targets) != 1 else ''}, "
+            f"{clean} clean, {total_errors} error"
+            f"{'s' if total_errors != 1 else ''}, "
+            f"{total_warnings} warning{'s' if total_warnings != 1 else ''}."
+        )
+
+    if total_errors:
+        return 1
+    if strict and total_warnings:
+        return 1
+    return 0
 
 
 def _cmd_schema_validate(file: Path, schema_name: str) -> int:

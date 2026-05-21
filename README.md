@@ -127,6 +127,30 @@ listing. `last` and `last-N` resolve to the newest / N-th newest run, so
 `dev-loop runs diff last-1 last --json` is the canonical "did the most
 recent change help or hurt?" query.
 
+## Authoring & linting replay scenarios
+
+Scenarios are the headless equivalent of recorded LLM output: a small
+directory of JSON + markdown that `--provider replay` reads back without
+making any network calls. The `scenarios` subcommand exposes the same
+structured form / lint rules the web UI's scenario builder enforces, so
+you can edit them in your editor and gate CI on the result:
+
+```bash
+dev-loop scenarios ls                       # table of scenarios + lint state
+dev-loop scenarios show <name>              # goal, e2e, lint, request preview
+dev-loop scenarios validate                 # lint every scenario in scenarios_dir
+dev-loop scenarios validate <name>          # lint just one
+dev-loop scenarios validate --strict --json # CI-friendly machine-readable output
+```
+
+`validate` exits non-zero on any error (or any issue under `--strict`),
+mirroring the UI's inline form validator so a scenario that's clean in
+the browser is clean in CI. The schema-equivalent checks live in
+`harness/scenarios.py:validate_scenario_form` — required
+`implementation_goal`, list-of-strings shape on every contract array,
+allowed e2e statuses (`passed` / `failed`), non-negative
+`duration_seconds`, and the conventions `replay_runner` expects.
+
 ## Provider model
 
 V1 supports three providers:

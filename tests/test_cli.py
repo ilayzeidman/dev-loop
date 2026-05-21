@@ -558,3 +558,230 @@ def test_schema_validate_ok(tmp_path: Path):
     f.write_text(json.dumps(obj))
     rc = cli.main(["schema", "validate", str(f), "task_contract.v1.json"])
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# scenarios ls / show / validate
+
+
+def _write_scenario(
+    scenarios_dir: Path,
+    name: str,
+    *,
+    goal: str = "demo goal",
+    status: str = "passed",
+    suite: str = "demo-e2e",
+    duration: int = 7,
+    extras_contract: dict | None = None,
+) -> Path:
+    d = scenarios_dir / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "task_request.md").write_text(f"# {name}\nDo a thing.\n")
+    contract = {
+        "type": "task_contract",
+        "implementation_goal": goal,
+        "assumptions": [],
+        "success_criteria": ["E2E reaches PLAYING"],
+        "non_goals": [],
+        "likely_components": [],
+        "validation_plan": [],
+        "ambiguities": [],
+        "can_start_without_human": True,
+    }
+    if extras_contract:
+        contract.update(extras_contract)
+    (d / "task_contract.json").write_text(json.dumps(contract))
+    (d / "implementation_result.json").write_text(json.dumps({
+        "type": "implementation_result",
+        "summary": "did it",
+        "hypothesis": "h",
+        "confidence": "medium",
+        "expected_validation": [],
+        "risk_notes": [],
+        "claimed_changed_files": [],
+    }))
+    (d / "e2e_result.json").write_text(json.dumps({
+        "status": status, "test_suite": suite, "duration_seconds": duration,
+    }))
+    return d
+
+
+def test_scenarios_ls_lists_alphabetical(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    sc = tmp_path / "scenarios"
+    _write_scenario(sc, "alpha", goal="alpha goal")
+    _write_scenario(sc, "beta", goal="beta goal")
+
+    rc = cli.main(["--repo", str(tmp_path), "scenarios", "ls"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "NAME" in out and "LINT" in out
+    assert out.index("alpha") < out.index("beta")
+    assert "ok" in out
+
+
+def test_scenarios_ls_empty_directory(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    rc = cli.main(["--repo", str(tmp_path), "scenarios", "ls"])
+    assert rc == 0
+    out = capsys.readouterr().out.lower()
+    assert "no scenarios" in out
+
+
+def test_scenarios_ls_json_payload(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    sc = tmp_path / "scenarios"
+    _write_scenario(sc, "alpha")
+    _write_scenario(sc, "broken", goal="")  # missing goal -> lint error
+
+    rc = cli.main(["--repo", str(tmp_path), "scenarios", "ls", "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    names = [s["name"] for s in payload["scenarios"]]
+    assert names == ["alpha", "broken"]
+    by_name = {s["name"]: s for s in payload["scenarios"]}
+    assert by_name["alpha"]["valid"] is True
+    assert by_name["broken"]["valid"] is False
+    assert by_name["broken"]["n_errors"] >= 1
+
+
+def test_scenarios_show_text_summary(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    sc = tmp_path / "scenarios"
+    _write_scenario(sc, "demo", goal="implement the demo")
+
+    rc = cli.main(["--repo", str(tmp_path), "scenarios", "show", "demo"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "name:" in out and "demo" in out
+    assert "implement the demo" in out
+    assert "lint:          ok" in out
+    assert "task_request.md" in out
+
+
+def test_scenarios_show_missing_clean_error(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    rc = cli.main(["--repo", str(tmp_path), "scenarios", "show", "nope"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "not found" in err.lower()
+    assert "scenarios ls" in err
+
+
+def test_scenarios_show_json_includes_issues(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    sc = tmp_path / "scenarios"
+    _write_scenario(sc, "broken", goal="")  # goal missing
+
+    rc = cli.main([
+        "--repo", str(tmp_path), "scenarios", "show", "broken", "--json",
+    ])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["name"] == "broken"
+    fields = [i["field"] for i in payload["issues"]]
+    assert "task_contract.implementation_goal" in fields
+
+
+def test_scenarios_validate_clean_returns_zero(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    sc = tmp_path / "scenarios"
+    _write_scenario(sc, "alpha")
+    _write_scenario(sc, "beta")
+
+    rc = cli.main(["--repo", str(tmp_path), "scenarios", "validate"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "alpha: ok" in out
+    assert "beta: ok" in out
+    assert "2 scenarios, 2 clean" in out
+
+
+def test_scenarios_validate_flags_errors(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    sc = tmp_path / "scenarios"
+    _write_scenario(sc, "good")
+    _write_scenario(sc, "broken", goal="")  # goal missing -> error
+
+    rc = cli.main(["--repo", str(tmp_path), "scenarios", "validate"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "good: ok" in out
+    assert "broken" in out
+    assert "implementation_goal" in out
+
+
+def test_scenarios_validate_named_scenario_only(tmp_path: Path, capsys):
+    """``validate <name>`` should not look at sibling scenarios."""
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    sc = tmp_path / "scenarios"
+    _write_scenario(sc, "good")
+    _write_scenario(sc, "broken", goal="")
+
+    rc = cli.main(["--repo", str(tmp_path), "scenarios", "validate", "good"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "good: ok" in out
+    assert "broken" not in out
+
+
+def test_scenarios_validate_missing_named_scenario_exits_two(
+    tmp_path: Path, capsys,
+):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    rc = cli.main([
+        "--repo", str(tmp_path), "scenarios", "validate", "ghost",
+    ])
+    assert rc == 2
+    err = capsys.readouterr().err.lower()
+    assert "not found" in err
+
+
+def test_scenarios_validate_json_payload(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    sc = tmp_path / "scenarios"
+    _write_scenario(sc, "good")
+    _write_scenario(sc, "broken", goal="")
+
+    rc = cli.main([
+        "--repo", str(tmp_path), "scenarios", "validate", "--json",
+    ])
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["totals"]["scenarios"] == 2
+    assert payload["totals"]["clean"] == 1
+    assert payload["totals"]["errors"] >= 1
+    by_name = {s["name"]: s for s in payload["scenarios"]}
+    assert by_name["good"]["valid"] is True
+    assert by_name["broken"]["valid"] is False
+
+
+def test_scenarios_validate_strict_promotes_warnings(tmp_path: Path, capsys):
+    """A failed-status scenario with no first_error is a warning; --strict
+    must convert that into a non-zero exit so CI can gate on it."""
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    sc = tmp_path / "scenarios"
+    # Failed status with empty first_error -> warning only.
+    d = _write_scenario(sc, "warn-only", status="failed")
+
+    rc = cli.main(["--repo", str(tmp_path), "scenarios", "validate"])
+    assert rc == 0  # warnings alone don't fail without --strict
+    capsys.readouterr()
+
+    rc = cli.main([
+        "--repo", str(tmp_path), "scenarios", "validate", "--strict",
+    ])
+    assert rc == 1
+    assert d.exists()

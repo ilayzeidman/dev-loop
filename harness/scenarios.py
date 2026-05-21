@@ -368,3 +368,75 @@ def _ensure_trailing_newline(s: str) -> str:
     if not s:
         return ""
     return s if s.endswith("\n") else s + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Directory inspection
+#
+# The CLI's ``scenarios`` subcommand and the web UI both want a cheap
+# summary view over the scenarios dir without parsing every JSON file
+# twice. ``list_scenarios`` and ``show_scenario`` are the public, tested
+# entry points for that.
+
+
+def list_scenarios(scenarios_dir: Path) -> list[dict[str, Any]]:
+    """Return a sorted summary of every scenario directory.
+
+    Each entry carries enough fields to render a one-line table row:
+    name, implementation_goal, e2e status / suite, number of files, and
+    whether the scenario is currently lint-clean. Malformed or missing
+    JSON is tolerated — the row still appears, with ``valid=False`` and
+    an issues count so the user knows which scenario to fix.
+    """
+    sd = Path(scenarios_dir)
+    if not sd.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for d in sorted(sd.iterdir(), key=lambda p: p.name):
+        if not d.is_dir():
+            continue
+        rows.append(_summarize_scenario(d))
+    return rows
+
+
+def show_scenario(scenarios_dir: Path, name: str) -> dict[str, Any] | None:
+    """Return a detailed summary for one scenario, or ``None`` if missing.
+
+    Includes the lint issues so callers can render them inline. The full
+    structured form is reachable via ``load_scenario_form`` for callers
+    that need every field; ``show_scenario`` is the read-only summary the
+    CLI's ``scenarios show`` prints.
+    """
+    sd = Path(scenarios_dir) / name
+    if not sd.is_dir():
+        return None
+    summary = _summarize_scenario(sd)
+    form = load_scenario_form(sd)
+    issues = [i.to_dict() for i in validate_scenario_form(form.to_dict())]
+    summary["issues"] = issues
+    summary["task_request"] = form.task_request
+    summary["other_files"] = list(form.other_files)
+    return summary
+
+
+def _summarize_scenario(scenario_dir: Path) -> dict[str, Any]:
+    form = load_scenario_form(scenario_dir)
+    issues = validate_scenario_form(form.to_dict())
+    n_errors = sum(1 for i in issues if i.level == "error")
+    n_warnings = sum(1 for i in issues if i.level == "warning")
+    file_count = 0
+    if scenario_dir.exists():
+        for _ in scenario_dir.rglob("*"):
+            file_count += 1
+    return {
+        "name": scenario_dir.name,
+        "path": str(scenario_dir),
+        "goal": (form.task_contract.get("implementation_goal") or "").strip(),
+        "e2e_status": form.e2e_result.get("status"),
+        "e2e_suite": form.e2e_result.get("test_suite"),
+        "duration_seconds": form.e2e_result.get("duration_seconds"),
+        "file_count": file_count,
+        "n_errors": n_errors,
+        "n_warnings": n_warnings,
+        "valid": n_errors == 0,
+    }
