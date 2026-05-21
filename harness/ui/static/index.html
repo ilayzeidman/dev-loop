@@ -9,13 +9,67 @@
 <body>
 <header>
   <div class="brand">dev-loop</div>
-  <nav>
+  <nav aria-label="Top-level sections">
     <button data-tab="build">Build</button>
     <button data-tab="run">Run</button>
     <button data-tab="analyze">Analyze</button>
   </nav>
-  <div class="repo-pill" id="repo-pill">—</div>
+  <button id="palette-open" class="palette-trigger" type="button"
+    title="Jump to anything (⌘K)" aria-label="Open command palette">
+    <span class="palette-trigger-label">Jump to…</span>
+    <kbd class="kbd">⌘K</kbd>
+  </button>
+  <div class="repo-pill" id="repo-pill" aria-label="Repository path">—</div>
 </header>
+
+<!-- Command palette (Cmd+K) -------------------------------------------- -->
+<div id="palette-backdrop" class="palette-backdrop hidden"
+  role="dialog" aria-modal="true" aria-labelledby="palette-title"
+  aria-hidden="true">
+  <div class="palette" role="combobox" aria-haspopup="listbox"
+    aria-expanded="true" aria-owns="palette-results">
+    <h2 id="palette-title" class="visually-hidden">Command palette</h2>
+    <input id="palette-input" type="text" autocomplete="off"
+      spellcheck="false" placeholder="Jump to anything — tab, builder, scenario, run, action…"
+      aria-controls="palette-results" aria-autocomplete="list">
+    <ul id="palette-results" class="palette-results" role="listbox"
+      aria-label="Palette results"></ul>
+    <div class="palette-footer">
+      <span><kbd class="kbd">↑↓</kbd> navigate</span>
+      <span><kbd class="kbd">↵</kbd> open</span>
+      <span><kbd class="kbd">Esc</kbd> close</span>
+      <span class="palette-spacer"></span>
+      <span id="palette-count" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Keyboard shortcuts cheat sheet ------------------------------------ -->
+<div id="shortcuts-backdrop" class="palette-backdrop hidden"
+  role="dialog" aria-modal="true" aria-labelledby="shortcuts-title"
+  aria-hidden="true">
+  <div class="shortcuts-card">
+    <h2 id="shortcuts-title">Keyboard shortcuts</h2>
+    <button id="shortcuts-close" class="palette-close" type="button"
+      aria-label="Close shortcuts help">×</button>
+    <table class="shortcuts-table">
+      <tbody>
+        <tr><th><kbd class="kbd">⌘K</kbd> / <kbd class="kbd">Ctrl K</kbd></th>
+            <td>Open command palette — jump to anything.</td></tr>
+        <tr><th><kbd class="kbd">⌘S</kbd> / <kbd class="kbd">Ctrl S</kbd></th>
+            <td>Save the focused form (config, scenario, playbook).</td></tr>
+        <tr><th><kbd class="kbd">Esc</kbd></th>
+            <td>Close palette · cancel inline new-scenario form · close this help.</td></tr>
+        <tr><th><kbd class="kbd">?</kbd></th>
+            <td>Show this help.</td></tr>
+        <tr><th><kbd class="kbd">g</kbd> then <kbd class="kbd">b</kbd>/<kbd class="kbd">r</kbd>/<kbd class="kbd">a</kbd></th>
+            <td>Go to Build · Run · Analyze.</td></tr>
+        <tr><th><kbd class="kbd">↑</kbd>/<kbd class="kbd">↓</kbd>, <kbd class="kbd">↵</kbd> (palette)</th>
+            <td>Move through results, then open.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
 
 <main>
 
@@ -545,7 +599,8 @@
               <div class="bundle-totals" id="bundle-preview-totals"></div>
               <table class="bundle-table">
                 <thead><tr>
-                  <th><input type="checkbox" id="bundle-toggle-all" checked></th>
+                  <th><input type="checkbox" id="bundle-toggle-all"
+                    aria-label="Toggle all items" checked></th>
                   <th>status</th>
                   <th>kind</th>
                   <th>path</th>

@@ -824,3 +824,114 @@ def test_scenario_create_writes_implementation_result_too(tmp_path: Path):
         assert ir["confidence"] in ("low", "medium", "high")
         tc = json.loads((d / "task_contract.json").read_text())
         assert tc["implementation_goal"] == "my goal"
+
+
+# ----- /api/palette (Cmd+K) ------------------------------------------------
+
+
+def test_palette_returns_baseline_tabs_and_actions(tmp_path: Path):
+    """An empty repo still has tabs, builder sections, subviews, playbooks,
+    schemas and the verb-style actions to offer the palette."""
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/palette")
+        assert status == 200
+        data = json.loads(body)
+        items = data["items"]
+        kinds = {it["kind"] for it in items}
+        # Every category that doesn't need user content should be present.
+        assert {"tab", "builder", "subview", "action"}.issubset(kinds)
+        # Tabs cover all three top-level surfaces.
+        tab_ids = {it["id"] for it in items if it["kind"] == "tab"}
+        assert tab_ids == {"build", "run", "analyze"}
+        # Built-in playbooks + schemas are listed.
+        assert any(it["kind"] == "playbook" for it in items)
+        assert any(it["kind"] == "schema" for it in items)
+        # Quick actions are listed by id, not just title.
+        action_ids = {it["id"] for it in items if it["kind"] == "action"}
+        assert "scenario.new" in action_ids
+        assert "shortcuts.help" in action_ids
+
+
+def test_palette_includes_scenarios_with_goal_for_matching(tmp_path: Path):
+    """A scenario's implementation_goal rides along as a subtitle so the
+    user can find it by typing what they asked the agent to do, not just
+    the slug they happened to pick."""
+    with _server(tmp_path) as (port, _):
+        _create_scenario(
+            port, name="encoder-oom-001",
+            goal="Fix encoder OOM at startup",
+        )
+        status, body = _get(port, "/api/palette")
+        assert status == 200
+        items = json.loads(body)["items"]
+        scenarios = [it for it in items if it["kind"] == "scenario"]
+        assert any(it["id"] == "encoder-oom-001" for it in scenarios)
+        sc = next(it for it in scenarios if it["id"] == "encoder-oom-001")
+        # The goal is exposed somewhere matchable (subtitle or keywords).
+        haystack = (sc.get("subtitle", "") + " "
+                    + sc.get("keywords", "")).lower()
+        assert "encoder oom" in haystack
+
+
+def test_palette_includes_recent_runs_with_status(tmp_path: Path):
+    """Past runs surface in the palette so a user can jump from any tab
+    straight to a task they ran yesterday."""
+    runs = tmp_path / ".dev-loop" / "runs" / "task-abc"
+    runs.mkdir(parents=True)
+    (runs / "task_manifest.json").write_text(json.dumps({
+        "task_id": "task-abc",
+        "final_status": "passed",
+        "task_contract": {"implementation_goal": "Wire up streaming"},
+        "created_at_utc": "2026-05-21T12:00:00Z",
+    }))
+    with _server(tmp_path) as (port, _):
+        items = json.loads(_get(port, "/api/palette")[1])["items"]
+        runs_items = [it for it in items if it["kind"] == "run"]
+        assert any(it["id"] == "task-abc" for it in runs_items)
+        run = next(it for it in runs_items if it["id"] == "task-abc")
+        assert run["status"] == "passed"
+        assert "streaming" in (run["subtitle"] + " " + run["keywords"]).lower()
+
+
+def test_palette_survives_a_corrupt_task_manifest(tmp_path: Path):
+    """One bad manifest must not nuke the palette for the other runs."""
+    runs = tmp_path / ".dev-loop" / "runs"
+    (runs / "task-ok").mkdir(parents=True)
+    (runs / "task-ok" / "task_manifest.json").write_text(json.dumps({
+        "task_id": "task-ok", "final_status": "passed",
+    }))
+    (runs / "task-broken").mkdir(parents=True)
+    (runs / "task-broken" / "task_manifest.json").write_text("{ not json")
+    with _server(tmp_path) as (port, _):
+        items = json.loads(_get(port, "/api/palette")[1])["items"]
+        run_ids = {it["id"] for it in items if it["kind"] == "run"}
+        assert "task-ok" in run_ids
+        assert "task-broken" not in run_ids
+
+
+def test_palette_caps_runs_to_avoid_huge_payload(tmp_path: Path):
+    """The palette is a fast index, not a full archive — old runs are
+    dropped server-side rather than sent to the client just to be
+    filtered out client-side."""
+    runs = tmp_path / ".dev-loop" / "runs"
+    runs.mkdir(parents=True)
+    for i in range(80):
+        d = runs / f"task-{i:03d}"
+        d.mkdir()
+        (d / "task_manifest.json").write_text(json.dumps({
+            "task_id": f"task-{i:03d}", "final_status": "passed",
+        }))
+    with _server(tmp_path) as (port, _):
+        items = json.loads(_get(port, "/api/palette")[1])["items"]
+        runs_items = [it for it in items if it["kind"] == "run"]
+        assert len(runs_items) <= 60
+
+
+def test_palette_listed_in_index_doc(tmp_path: Path):
+    """Sanity: index.html includes the palette trigger so the user can
+    find the keyboard shortcut even before discovering Cmd+K."""
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/")
+        assert status == 200
+        assert 'id="palette-input"' in body
+        assert "⌘K" in body

@@ -1081,7 +1081,9 @@ function renderBundlePreview() {
     const cls = c.status === "new" ? "pass"
               : c.status === "conflict" ? "fail" : "";
     return `<tr class="status-${c.status}">
-      <td><input type="checkbox" data-bundle-path="${escapeAttr(c.path)}" ${checked} ${disabled}></td>
+      <td><input type="checkbox"
+        aria-label="Include ${escapeAttr(c.path)}"
+        data-bundle-path="${escapeAttr(c.path)}" ${checked} ${disabled}></td>
       <td><span class="pill ${cls}">${escapeHtml(c.status)}</span></td>
       <td><code>${escapeHtml(c.kind)}</code></td>
       <td><code>${escapeHtml(c.path)}</code></td>
@@ -1796,10 +1798,461 @@ function inline(s) {
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
 }
 
+// ----- Cmd+K command palette --------------------------------------------
+//
+// One palette indexes every destination the user might want to jump to:
+// tabs, builder sections, scenarios (by name + goal), runs (by id + goal +
+// status), playbooks, schemas, and a small set of verb-style actions. The
+// server gathers the corpus in one round-trip (``/api/palette``); fuzzy-
+// matching, ranking, highlighting and keyboard nav all happen here.
+//
+// The Esc handler in this section also doubles as the universal "cancel
+// inline form" key, so a user editing a new scenario can bail without
+// reaching for the mouse.
+
+let PALETTE_ITEMS = [];        // raw list from /api/palette
+let PALETTE_FILTERED = [];     // {item, score, highlights} ordered for display
+let PALETTE_INDEX = 0;         // active row in PALETTE_FILTERED
+let PALETTE_OPEN = false;
+let PALETTE_LAST_LOAD = 0;     // ms epoch; refresh on open if stale
+let G_PREFIX_TIMER = null;     // "g then b/r/a" chord support
+
+async function loadPaletteItems(force = false) {
+  // Refresh on a 10s TTL so a freshly-saved scenario shows up without
+  // forcing a full reload, but back-to-back palette opens are instant.
+  const now = Date.now();
+  if (!force && PALETTE_ITEMS.length && now - PALETTE_LAST_LOAD < 10_000) return;
+  try {
+    const r = await getJSON("/api/palette");
+    PALETTE_ITEMS = r.items || [];
+    PALETTE_LAST_LOAD = now;
+  } catch (e) {
+    // Network hiccup — leave the prior corpus in place so the palette
+    // still works on the last-known index.
+    if (!PALETTE_ITEMS.length) PALETTE_ITEMS = [];
+  }
+}
+
+function openPalette() {
+  if (PALETTE_OPEN) return;
+  PALETTE_OPEN = true;
+  const back = $("#palette-backdrop");
+  back.classList.remove("hidden");
+  back.setAttribute("aria-hidden", "false");
+  const input = $("#palette-input");
+  input.value = "";
+  loadPaletteItems().then(() => {
+    filterPalette("");
+    input.focus();
+  });
+}
+
+function closePalette() {
+  if (!PALETTE_OPEN) return;
+  PALETTE_OPEN = false;
+  const back = $("#palette-backdrop");
+  back.classList.add("hidden");
+  back.setAttribute("aria-hidden", "true");
+}
+
+// Tiny fuzzy matcher. Returns null if every query char isn't found in
+// order, otherwise a score (smaller is better) plus an array of matched
+// char indices for highlighting. Word-boundary hits and prefix matches
+// score better, mirroring what users expect of a Cmd+K palette.
+function fuzzyMatch(query, text) {
+  if (!query) return {score: 0, hits: []};
+  const q = query.toLowerCase();
+  const t = text.toLowerCase();
+  let qi = 0, ti = 0, score = 0;
+  const hits = [];
+  let lastHit = -2;
+  let inGap = false;
+  while (qi < q.length && ti < t.length) {
+    if (q[qi] === t[ti]) {
+      // Bonus: hit at start, hit after a word boundary, hit right after the
+      // previous hit (contiguous run).
+      if (ti === 0) score -= 8;
+      else if (/\W|_/.test(t[ti - 1])) score -= 6;
+      if (ti === lastHit + 1) score -= 4;
+      else if (inGap) score += 1;
+      // Match the original (case-preserved) char positions for highlight.
+      hits.push(ti);
+      lastHit = ti;
+      qi++; inGap = false;
+    } else {
+      inGap = true;
+      score += 1;
+    }
+    ti++;
+  }
+  if (qi < q.length) return null;
+  // Penalise long strings so short, focused titles bubble up.
+  score += Math.floor(t.length / 80);
+  return {score, hits};
+}
+
+function highlight(text, hits) {
+  if (!hits || !hits.length) return escapeHtml(text);
+  // hits index into the lowercased version; lengths line up 1:1 with the
+  // original, so the same offsets work for slicing.
+  const out = [];
+  let cur = 0;
+  for (const h of hits) {
+    if (h > cur) out.push(escapeHtml(text.slice(cur, h)));
+    out.push(`<mark>${escapeHtml(text.slice(h, h + 1))}</mark>`);
+    cur = h + 1;
+  }
+  if (cur < text.length) out.push(escapeHtml(text.slice(cur)));
+  return out.join("");
+}
+
+function filterPalette(q) {
+  q = (q || "").trim();
+  if (!q) {
+    // Empty query: surface "useful" defaults — actions first, then tabs,
+    // then a few recent runs / scenarios. Keeps the open-no-typing state
+    // from looking like an avalanche.
+    PALETTE_FILTERED = PALETTE_ITEMS
+      .filter(it => ["action", "tab", "builder"].includes(it.kind))
+      .map(it => ({item: it, hits: {title: [], subtitle: []}, score: 0}));
+  } else {
+    const out = [];
+    for (const it of PALETTE_ITEMS) {
+      const title = fuzzyMatch(q, it.title || "");
+      const sub = fuzzyMatch(q, it.subtitle || "");
+      const kw = fuzzyMatch(q, it.keywords || "");
+      const best = [title, sub, kw].filter(Boolean)
+        .sort((a, b) => a.score - b.score)[0];
+      if (!best) continue;
+      // Subtitle / keyword-only matches score a bit worse than title hits
+      // so the "right" item ranks first when the user types its name.
+      const score = best.score + (best === title ? 0 : best === sub ? 4 : 8);
+      out.push({
+        item: it, score,
+        hits: {
+          title: title ? title.hits : [],
+          subtitle: sub ? sub.hits : [],
+        },
+      });
+    }
+    out.sort((a, b) => a.score - b.score);
+    PALETTE_FILTERED = out.slice(0, 50);
+  }
+  PALETTE_INDEX = 0;
+  renderPalette();
+}
+
+function renderPalette() {
+  const ul = $("#palette-results");
+  const count = $("#palette-count");
+  if (!PALETTE_FILTERED.length) {
+    ul.innerHTML = '<li class="palette-empty" role="option" aria-disabled="true">No matches. Try a tab, scenario, or run id.</li>';
+    count.textContent = "";
+    return;
+  }
+  // Group by .group, preserving order, headers for orientation.
+  let lastGroup = null;
+  const rows = [];
+  PALETTE_FILTERED.forEach((entry, i) => {
+    const it = entry.item;
+    if (it.group && it.group !== lastGroup) {
+      rows.push(`<li class="palette-group-header" role="presentation">${escapeHtml(it.group)}</li>`);
+      lastGroup = it.group;
+    }
+    const active = i === PALETTE_INDEX ? "active" : "";
+    const titleHtml = highlight(it.title || "", entry.hits.title);
+    const subHtml = highlight(it.subtitle || "", entry.hits.subtitle);
+    const status = it.status
+      ? `<span class="palette-status ${pillClass(it.status)}">${escapeHtml(it.status)}</span>`
+      : "";
+    rows.push(`<li class="${active}" role="option"
+      aria-selected="${active ? "true" : "false"}" data-idx="${i}">
+      <span class="palette-kind">${escapeHtml(it.kind)}</span>
+      <span>
+        <span class="palette-title">${titleHtml}</span>
+        <span class="palette-subtitle">${subHtml}</span>
+      </span>
+      ${status}
+    </li>`);
+  });
+  ul.innerHTML = rows.join("");
+  count.textContent = `${PALETTE_FILTERED.length} match${PALETTE_FILTERED.length !== 1 ? "es" : ""}`;
+  scrollActivePaletteRowIntoView();
+}
+
+function scrollActivePaletteRowIntoView() {
+  const ul = $("#palette-results");
+  const row = ul.querySelector("li.active");
+  if (row) row.scrollIntoView({block: "nearest"});
+}
+
+function movePalette(delta) {
+  if (!PALETTE_FILTERED.length) return;
+  PALETTE_INDEX = (PALETTE_INDEX + delta + PALETTE_FILTERED.length) % PALETTE_FILTERED.length;
+  // Re-render lightly — toggling the active class is enough.
+  $$("#palette-results li[data-idx]").forEach(li => {
+    const idx = Number(li.dataset.idx);
+    li.classList.toggle("active", idx === PALETTE_INDEX);
+    li.setAttribute("aria-selected", idx === PALETTE_INDEX ? "true" : "false");
+  });
+  scrollActivePaletteRowIntoView();
+}
+
+function activatePalette(idx) {
+  const entry = PALETTE_FILTERED[idx];
+  if (!entry) return;
+  closePalette();
+  routePaletteItem(entry.item);
+}
+
+function routePaletteItem(it) {
+  switch (it.kind) {
+    case "tab":
+      showTab(it.id);
+      return;
+    case "builder":
+      showTab("build");
+      selectBuilder(it.id);
+      return;
+    case "subview":
+      if (!$("#tab-analyze").classList.contains("hidden") && CURRENT_TASK) {
+        selectSubview(it.id);
+        updateLocationHash();
+      } else {
+        showTab("analyze");
+        toast("pick a run on the left first");
+      }
+      return;
+    case "scenario":
+      showTab("build");
+      selectBuilder("scenarios");
+      // Wait one tick for the select to populate, then change to ours.
+      setTimeout(() => {
+        const sel = $("#sc-select");
+        if (sel && Array.from(sel.options).some(o => o.value === it.id)) {
+          sel.value = it.id;
+          loadScenario(it.id);
+        }
+      }, 100);
+      return;
+    case "playbook":
+      showTab("build");
+      selectBuilder("playbooks");
+      setTimeout(() => {
+        const sel = $("#pb-select");
+        if (sel && Array.from(sel.options).some(o => o.value === it.id)) {
+          sel.value = it.id; loadPlaybook(it.id);
+        }
+      }, 100);
+      return;
+    case "schema":
+      showTab("build");
+      selectBuilder("schemas");
+      setTimeout(() => {
+        const sel = $("#sch-select");
+        if (sel && Array.from(sel.options).some(o => o.value === it.id)) {
+          sel.value = it.id; loadSchema(it.id);
+        }
+      }, 100);
+      return;
+    case "run":
+      selectRun(it.id);
+      return;
+    case "action":
+      runPaletteAction(it.id);
+      return;
+  }
+}
+
+function runPaletteAction(id) {
+  if (id === "scenario.new") {
+    showTab("build");
+    selectBuilder("scenarios");
+    setTimeout(() => {
+      $("#sc-new-form").classList.remove("hidden");
+      $("#sc-new-name").focus();
+    }, 100);
+    return;
+  }
+  if (id === "shortcuts.help") {
+    openShortcutsHelp();
+    return;
+  }
+}
+
+function openShortcutsHelp() {
+  const back = $("#shortcuts-backdrop");
+  back.classList.remove("hidden");
+  back.setAttribute("aria-hidden", "false");
+  $("#shortcuts-close").focus();
+}
+function closeShortcutsHelp() {
+  const back = $("#shortcuts-backdrop");
+  back.classList.add("hidden");
+  back.setAttribute("aria-hidden", "true");
+}
+
+// ---- DOM wiring for palette --------------------------------------------
+
+$("#palette-open").addEventListener("click", openPalette);
+$("#palette-backdrop").addEventListener("click", e => {
+  // Click on the backdrop (outside the card) closes; clicks inside the
+  // card bubble up to here but with .palette as the closest ancestor.
+  if (e.target.id === "palette-backdrop") closePalette();
+});
+$("#palette-input").addEventListener("input", e => filterPalette(e.target.value));
+$("#palette-input").addEventListener("keydown", e => {
+  if (e.key === "ArrowDown") { e.preventDefault(); movePalette(1); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); movePalette(-1); }
+  else if (e.key === "Enter") { e.preventDefault(); activatePalette(PALETTE_INDEX); }
+  else if (e.key === "Escape") { e.preventDefault(); closePalette(); }
+  else if (e.key === "Home") { e.preventDefault(); PALETTE_INDEX = 0; renderPalette(); }
+  else if (e.key === "End") { e.preventDefault(); PALETTE_INDEX = PALETTE_FILTERED.length - 1; renderPalette(); }
+});
+$("#palette-results").addEventListener("click", e => {
+  const li = e.target.closest("li[data-idx]");
+  if (!li) return;
+  activatePalette(Number(li.dataset.idx));
+});
+$("#palette-results").addEventListener("mousemove", e => {
+  const li = e.target.closest("li[data-idx]");
+  if (!li) return;
+  const idx = Number(li.dataset.idx);
+  if (idx === PALETTE_INDEX) return;
+  PALETTE_INDEX = idx;
+  $$("#palette-results li[data-idx]").forEach(x => {
+    const xi = Number(x.dataset.idx);
+    x.classList.toggle("active", xi === PALETTE_INDEX);
+    x.setAttribute("aria-selected", xi === PALETTE_INDEX ? "true" : "false");
+  });
+});
+
+$("#shortcuts-close").addEventListener("click", closeShortcutsHelp);
+$("#shortcuts-backdrop").addEventListener("click", e => {
+  if (e.target.id === "shortcuts-backdrop") closeShortcutsHelp();
+});
+
+// ---- Global keyboard shortcuts -----------------------------------------
+//
+// Cmd+K / Ctrl+K  → palette
+// Cmd+S / Ctrl+S  → save the focused form (config / scenario / playbook)
+// Esc             → close palette · cancel inline form · close help
+// ?               → open shortcuts help
+// g then b/r/a    → jump tabs (Vim/GitHub style — no modifier)
+
+function isTypingTarget(el) {
+  if (!el) return false;
+  const tag = el.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (el.isContentEditable) return true;
+  return false;
+}
+
+function activeFormContext() {
+  // Map the currently-visible work surface to a "save" handler. This
+  // lets Cmd+S do the right thing whether the user is in the config form,
+  // scenario form, or playbook editor without us having to track focus.
+  if (!$("#tab-build").classList.contains("hidden")) {
+    if (!$("#builder-config").classList.contains("hidden")) {
+      return {save: () => $("#cfg-save").click(), name: "config"};
+    }
+    if (!$("#builder-scenarios").classList.contains("hidden")) {
+      // In raw-files mode, save the focused file rather than the form.
+      if (!$("#sc-raw-pane").classList.contains("hidden")) {
+        return {save: () => $("#sc-save-raw").click(), name: "scenario file"};
+      }
+      return {save: () => $("#sc-save").click(), name: "scenario"};
+    }
+    if (!$("#builder-playbooks").classList.contains("hidden")) {
+      return {save: () => $("#pb-save").click(), name: "playbook"};
+    }
+  }
+  return null;
+}
+
+window.addEventListener("keydown", e => {
+  // Cmd+K / Ctrl+K — palette. Works from any context, including inside
+  // a text input.
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey
+      && (e.key === "k" || e.key === "K")) {
+    e.preventDefault();
+    if (PALETTE_OPEN) closePalette();
+    else openPalette();
+    return;
+  }
+
+  // Cmd+S / Ctrl+S — save. Works from inside inputs too, since that's
+  // exactly where the user is when they want to save.
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey
+      && (e.key === "s" || e.key === "S")) {
+    const ctx = activeFormContext();
+    if (ctx) {
+      e.preventDefault();
+      ctx.save();
+    }
+    return;
+  }
+
+  // Esc — close whichever transient surface is open. The palette/help
+  // input handlers above also stop at this branch when they're focused;
+  // this catch-all covers inline forms (Esc cancels new-scenario) and
+  // a user pressing Esc while focused on a non-input.
+  if (e.key === "Escape") {
+    if (PALETTE_OPEN) { closePalette(); e.preventDefault(); return; }
+    if (!$("#shortcuts-backdrop").classList.contains("hidden")) {
+      closeShortcutsHelp(); e.preventDefault(); return;
+    }
+    if (!$("#sc-new-form").classList.contains("hidden")) {
+      $("#sc-new-cancel").click(); e.preventDefault(); return;
+    }
+    return;
+  }
+
+  // ? — shortcuts help. Skip if the user is typing into a text input
+  // (where ? is a legitimate character).
+  if (e.key === "?" && !e.metaKey && !e.ctrlKey && !e.altKey
+      && !isTypingTarget(e.target)) {
+    e.preventDefault();
+    openShortcutsHelp();
+    return;
+  }
+
+  // "g then b/r/a" chord. Only when not typing.
+  if (isTypingTarget(e.target)) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+  if (G_PREFIX_TIMER && (e.key === "b" || e.key === "B")) {
+    e.preventDefault(); clearTimeout(G_PREFIX_TIMER); G_PREFIX_TIMER = null;
+    showTab("build"); return;
+  }
+  if (G_PREFIX_TIMER && (e.key === "r" || e.key === "R")) {
+    e.preventDefault(); clearTimeout(G_PREFIX_TIMER); G_PREFIX_TIMER = null;
+    showTab("run"); return;
+  }
+  if (G_PREFIX_TIMER && (e.key === "a" || e.key === "A")) {
+    e.preventDefault(); clearTimeout(G_PREFIX_TIMER); G_PREFIX_TIMER = null;
+    showTab("analyze"); return;
+  }
+  if (e.key === "g" || e.key === "G") {
+    e.preventDefault();
+    if (G_PREFIX_TIMER) clearTimeout(G_PREFIX_TIMER);
+    G_PREFIX_TIMER = setTimeout(() => { G_PREFIX_TIMER = null; }, 900);
+    return;
+  }
+  // Any other key while a g-prefix is pending cancels the chord.
+  if (G_PREFIX_TIMER) {
+    clearTimeout(G_PREFIX_TIMER); G_PREFIX_TIMER = null;
+  }
+});
+
 // initial state
 (async () => {
   // If we landed here via a shared link like ``#/run/<task-id>/iterations``
   // jump straight there; otherwise fall back to the Build tab.
   const consumed = await consumeLocationHash().catch(() => false);
   if (!consumed) showTab("build");
+  // Warm the palette index in the background so the first Cmd+K is
+  // instant — the corpus is small (< 30KB) and we already paid for the
+  // server's static-file cost.
+  loadPaletteItems().catch(() => {});
 })();

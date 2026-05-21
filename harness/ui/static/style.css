@@ -475,3 +475,176 @@ button:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
 #bundle-preview { margin-top: 0.8em; }
 #bundle-apply-report { margin-top: 0.8em; }
 #bundle-apply-report h4 { margin: 0.5em 0 0.3em; }
+
+/* Command palette (Cmd+K) ----------------------------------------------- */
+.palette-trigger {
+  background: var(--panel-2); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 999px;
+  font-weight: 400; font-size: 0.82em;
+  padding: 0.3em 0.55em 0.3em 0.85em;
+  display: inline-flex; align-items: center; gap: 0.55em;
+  margin-left: auto;
+}
+.palette-trigger:hover { color: var(--fg); border-color: var(--accent); }
+.palette-trigger .palette-trigger-label { font-weight: 500; }
+.palette-trigger + .repo-pill { margin-left: 0.6em; }
+
+.kbd {
+  display: inline-block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75em;
+  padding: 0.1em 0.45em;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--code);
+  color: var(--muted);
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.palette-backdrop {
+  position: fixed; inset: 0; z-index: 2000;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding-top: 14vh;
+  animation: paletteFade 0.10s ease-out;
+}
+.palette-backdrop.hidden { display: none; }
+@keyframes paletteFade {
+  from { opacity: 0; } to { opacity: 1; }
+}
+.palette {
+  width: min(680px, 92vw);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.55);
+  display: flex; flex-direction: column;
+  max-height: 70vh; overflow: hidden;
+}
+#palette-input {
+  width: 100%; border: 0; border-bottom: 1px solid var(--border);
+  background: transparent; color: var(--fg);
+  padding: 0.95em 1em; font-size: 1.02em; border-radius: 0;
+  outline: none;
+}
+#palette-input:focus { outline: none; }
+.palette-results {
+  list-style: none; margin: 0; padding: 0.3em 0;
+  overflow-y: auto; max-height: 50vh;
+}
+.palette-results li {
+  display: grid;
+  grid-template-columns: 5.4em 1fr auto;
+  gap: 0.7em; align-items: baseline;
+  padding: 0.45em 1em;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+}
+.palette-results li:hover,
+.palette-results li.active {
+  background: var(--panel-2);
+  border-left-color: var(--accent);
+}
+.palette-results .palette-kind {
+  font-size: 0.7em; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--muted);
+  background: var(--code);
+  padding: 0.1em 0.5em;
+  border-radius: 999px;
+  text-align: center;
+  white-space: nowrap;
+  align-self: center;
+}
+.palette-results .palette-title {
+  display: block; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.palette-results .palette-subtitle {
+  display: block;
+  color: var(--muted); font-size: 0.82em; margin-top: 0.1em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.palette-results .palette-status {
+  font-size: 0.72em; color: var(--muted); align-self: center;
+}
+.palette-results .palette-status.pass { color: var(--ok); }
+.palette-results .palette-status.fail { color: var(--err); }
+.palette-results mark {
+  background: rgba(122, 162, 255, 0.28);
+  color: inherit; border-radius: 2px;
+  padding: 0 0.05em;
+}
+.palette-results .palette-group-header {
+  padding: 0.55em 1em 0.2em;
+  font-size: 0.7em; text-transform: uppercase; letter-spacing: 0.6px;
+  color: var(--muted); cursor: default;
+  display: block; border-left: 0; background: transparent;
+}
+.palette-results .palette-group-header:hover { background: transparent; }
+.palette-results .palette-empty {
+  padding: 1.2em 1em; color: var(--muted); cursor: default; text-align: center;
+  display: block; border-left: 0;
+}
+.palette-results .palette-empty:hover { background: transparent; }
+.palette-footer {
+  border-top: 1px solid var(--border);
+  padding: 0.5em 1em;
+  display: flex; gap: 1em; flex-wrap: wrap;
+  font-size: 0.78em; color: var(--muted);
+  background: var(--panel-2);
+}
+.palette-footer .palette-spacer { flex: 1; }
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+/* Keyboard shortcuts cheat-sheet card ----------------------------------- */
+.shortcuts-card {
+  width: min(560px, 92vw);
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 1.1em 1.3em 1em;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.55);
+  position: relative;
+}
+.shortcuts-card h2 { margin: 0 0 0.6em 0; font-size: 1.05em; }
+.shortcuts-table { width: 100%; font-size: 0.9em; }
+.shortcuts-table th {
+  text-align: left; padding: 0.35em 0.6em 0.35em 0;
+  font-weight: 400; vertical-align: top; white-space: nowrap;
+  color: var(--fg); text-transform: none; letter-spacing: 0; font-size: 0.9em;
+  border-bottom: 1px solid var(--border);
+}
+.shortcuts-table td {
+  padding: 0.35em 0; color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.shortcuts-table tr:last-child th,
+.shortcuts-table tr:last-child td { border-bottom: 0; }
+.palette-close {
+  position: absolute; top: 0.5em; right: 0.7em;
+  background: transparent; color: var(--muted); border: 0;
+  font-size: 1.4em; line-height: 1; padding: 0.2em 0.4em;
+  cursor: pointer; border-radius: 6px;
+}
+.palette-close:hover { color: var(--fg); background: var(--panel-2); }
+
+/* Visible keyboard focus everywhere ------------------------------------- */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* Don't double up the outline on the palette input — its own border line
+ * does the job and an extra outline visibly clips inside the rounded card. */
+#palette-input:focus-visible { outline: 0; }

@@ -26,6 +26,7 @@ Read endpoints
   GET  /api/schemas/<name>               raw schema JSON
   GET  /api/jobs/<id>                    background job status + log
   GET  /api/bundle/export                JSON bundle of this repo's config
+  GET  /api/palette                      unified jump-to index (Cmd+K)
 
 Write endpoints
   POST /api/config/raw                   replace config.yaml
@@ -249,6 +250,7 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             if p == "/api/playbooks": self._api_list_playbooks(); return
             if p == "/api/schemas": self._api_list_schemas(); return
             if p == "/api/bundle/export": self._api_bundle_export(); return
+            if p == "/api/palette": self._api_palette(); return
             if p.startswith("/api/runs/"):
                 self._api_run_subroute(p[len("/api/runs/"):]); return
             if p.startswith("/api/scenarios/"):
@@ -933,6 +935,153 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 self._send_text(404, "not found"); return
             self._send_text(200, f.read_text(encoding="utf-8"),
                             "application/json; charset=utf-8")
+
+        # ----- command palette (Cmd+K) -------------------------------
+
+        def _api_palette(self) -> None:
+            """Unified jump-to index for the Cmd+K command palette.
+
+            One round-trip returns every destination the user might want to
+            jump to: tabs, builder sections, run-tab subviews, every
+            scenario (with its goal), every playbook, every schema, every
+            recent run (newest 60, with status + goal), and a small set of
+            verb-style quick actions. The client fuzzy-matches client-side;
+            this endpoint just gathers the corpus so we don't have to
+            chase three other endpoints to populate the palette.
+            """
+            _, r = _resolved()
+            items: list[dict[str, Any]] = []
+
+            # 1. Tabs.
+            for tab, label, hint in (
+                ("build", "Build", "configure this repo"),
+                ("run", "Run", "launch a /implement loop"),
+                ("analyze", "Analyze", "browse past runs"),
+            ):
+                items.append({
+                    "kind": "tab", "id": tab, "title": label,
+                    "subtitle": hint, "group": "Tabs",
+                    "keywords": f"go to {label.lower()}",
+                })
+
+            # 2. Builder sections.
+            for sec, label, hint in (
+                ("overview", "Overview", "flow + onboarding"),
+                ("config", "Config", ".dev-loop/config.yaml"),
+                ("capabilities", "Capabilities",
+                 "registered external actions"),
+                ("playbooks", "Playbooks", "agent prompts"),
+                ("schemas", "Schemas", "JSON schemas"),
+                ("scenarios", "Scenarios", "replay fixtures"),
+                ("share", "Share & reuse", "export/import bundles"),
+            ):
+                items.append({
+                    "kind": "builder", "id": sec,
+                    "title": f"Build · {label}",
+                    "subtitle": hint, "group": "Build sections",
+                    "keywords": f"build {label.lower()} {sec}",
+                })
+
+            # 3. Run-tab subviews (only useful when a run is open, but
+            # listing them lets the user keyboard-jump from anywhere).
+            for sub, label in (
+                ("report", "Report"), ("iterations", "Iterations"),
+                ("audit", "Audit log"), ("raw", "Raw report"),
+            ):
+                items.append({
+                    "kind": "subview", "id": sub,
+                    "title": f"Analyze · {label}",
+                    "subtitle": "open in current run",
+                    "group": "Analyze subviews",
+                    "keywords": f"analyze {label.lower()}",
+                })
+
+            # 4. Scenarios — read each one's goal for matching.
+            sc_dir = r.scenarios_dir
+            if sc_dir.exists():
+                for d in sorted(sc_dir.iterdir()):
+                    if not d.is_dir():
+                        continue
+                    goal = ""
+                    tc_path = d / "task_contract.json"
+                    if tc_path.exists():
+                        try:
+                            tc = read_json(tc_path)
+                            goal = (tc.get("implementation_goal") or "")[:120]
+                        except Exception:
+                            goal = ""
+                    items.append({
+                        "kind": "scenario", "id": d.name,
+                        "title": d.name,
+                        "subtitle": goal or "(no goal recorded)",
+                        "group": "Scenarios",
+                        "keywords": f"scenario replay {d.name} {goal}",
+                    })
+
+            # 5. Playbooks + schemas (lightweight, just filenames).
+            for p in sorted(PLAYBOOK_DIR.glob("*.md")):
+                items.append({
+                    "kind": "playbook", "id": p.name, "title": p.name,
+                    "subtitle": "playbook", "group": "Playbooks",
+                    "keywords": f"playbook {p.name}",
+                })
+            for p in sorted(SCHEMA_DIR.glob("*.json")):
+                items.append({
+                    "kind": "schema", "id": p.name, "title": p.name,
+                    "subtitle": "schema", "group": "Schemas",
+                    "keywords": f"schema {p.name}",
+                })
+
+            # 6. Recent runs — newest first, capped at 60 to keep payload tiny.
+            runs_dir = r.runs_dir
+            if runs_dir.exists():
+                run_dirs = sorted(
+                    (d for d in runs_dir.iterdir() if d.is_dir()),
+                    reverse=True,
+                )
+                for d in run_dirs[:60]:
+                    tm = d / "task_manifest.json"
+                    if not tm.exists():
+                        continue
+                    try:
+                        data = read_json(tm)
+                    except Exception:
+                        continue
+                    tc = data.get("task_contract") or {}
+                    status = (data.get("final_status")
+                              or data.get("status") or "")
+                    goal = (tc.get("implementation_goal") or "")[:120]
+                    items.append({
+                        "kind": "run", "id": data.get("task_id", d.name),
+                        "title": data.get("task_id", d.name),
+                        "subtitle": (
+                            f"[{status}] {goal}" if status else goal
+                        ) or "(no contract)",
+                        "group": "Runs",
+                        "status": status,
+                        "keywords": f"run {data.get('task_id', d.name)} "
+                                    f"{status} {goal}",
+                    })
+
+            # 7. Verb-style quick actions. These do something rather than
+            # navigate, but live in the same palette to keep one keyboard
+            # shortcut for "do anything".
+            items.append({
+                "kind": "action", "id": "scenario.new",
+                "title": "New scenario…",
+                "subtitle": "create a replay fixture",
+                "group": "Actions",
+                "keywords": "new scenario create add replay",
+            })
+            items.append({
+                "kind": "action", "id": "shortcuts.help",
+                "title": "Keyboard shortcuts",
+                "subtitle": "show the cheat-sheet",
+                "group": "Actions",
+                "keywords": "help shortcuts keys cheat sheet",
+            })
+
+            self._send_json(200, {"items": items})
 
         # ----- jobs / implement --------------------------------------
 
