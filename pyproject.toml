@@ -28,5 +28,6 @@ harness = [
     "schemas/*.json",
     "playbooks/*.md",
     "capabilities/registry.yaml",
+    "bundle_templates/*.json",
     "ui/static/*",
 ]

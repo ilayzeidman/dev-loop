@@ -13,12 +13,16 @@ based on.
 ```bash
 # from any repo:
 pip install dev-loop                  # or: pip install -e <path-to-dev-loop>
-dev-loop init                         # scaffolds .dev-loop/config.yaml
-dev-loop config show                  # prints resolved paths + policy
+dev-loop init --starter               # scaffolds config + bundled demo scenario
+dev-loop replay hello-dev-loop        # full pass-through, no LLM needed
 dev-loop ui                           # opens the local web UI
 ```
 
-That's all the setup. The UI lets you:
+Prefer the browser? `dev-loop ui` opens a one-click onboarding panel that
+does the same scaffolding and offers a "Try the demo run" button so you
+can confirm the harness end-to-end before configuring anything.
+
+The UI lets you:
 
 - **Build** — edit the per-repo config, view & edit capabilities,
   playbooks, schemas, and replay scenarios.

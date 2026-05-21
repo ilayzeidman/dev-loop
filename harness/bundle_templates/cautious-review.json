@@ -1,0 +1,22 @@
+{
+  "format": "dev-loop-bundle",
+  "format_version": 1,
+  "template": {
+    "id": "cautious-review",
+    "title": "Cautious review",
+    "summary": "Generous iteration budget plus extra validation attempts and diagnostic rounds for hard-to-pin-down bugs.",
+    "tags": ["thorough", "policy", "review"],
+    "order": 30
+  },
+  "source": {
+    "repo_name": "template:cautious-review",
+    "repo_path": "(bundled template)"
+  },
+  "note": "Cautious-review template — high iteration cap, multiple validation attempts, deeper diagnostics.",
+  "config": {
+    "present": true,
+    "yaml": "# dev-loop configuration for this repository.\n#\n# Template: cautious-review\n# Spend more wall-clock for tricky failures the agent should keep investigating.\n\nruns_dir: .dev-loop/runs\ndefault_provider: replay\nscenarios_dir: scenarios\n\npolicy:\n  max_code_iterations: 15\n  max_validation_attempts_per_iteration: 4\n  max_diagnostic_rounds_per_failure: 6\n  max_total_wall_clock_minutes: 240\n\nnotes: cautious-review template — go slow, keep digging.\n"
+  },
+  "scenarios": [],
+  "playbooks": []
+}

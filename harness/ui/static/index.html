@@ -9,13 +9,67 @@
 <body>
 <header>
   <div class="brand">dev-loop</div>
-  <nav>
+  <nav aria-label="Top-level sections">
     <button data-tab="build">Build</button>
     <button data-tab="run">Run</button>
     <button data-tab="analyze">Analyze</button>
   </nav>
-  <div class="repo-pill" id="repo-pill">—</div>
+  <button id="palette-open" class="palette-trigger" type="button"
+    title="Jump to anything (⌘K)" aria-label="Open command palette">
+    <span class="palette-trigger-label">Jump to…</span>
+    <kbd class="kbd">⌘K</kbd>
+  </button>
+  <div class="repo-pill" id="repo-pill" aria-label="Repository path">—</div>
 </header>
+
+<!-- Command palette (Cmd+K) -------------------------------------------- -->
+<div id="palette-backdrop" class="palette-backdrop hidden"
+  role="dialog" aria-modal="true" aria-labelledby="palette-title"
+  aria-hidden="true">
+  <div class="palette" role="combobox" aria-haspopup="listbox"
+    aria-expanded="true" aria-owns="palette-results">
+    <h2 id="palette-title" class="visually-hidden">Command palette</h2>
+    <input id="palette-input" type="text" autocomplete="off"
+      spellcheck="false" placeholder="Jump to anything — tab, builder, scenario, run, action…"
+      aria-controls="palette-results" aria-autocomplete="list">
+    <ul id="palette-results" class="palette-results" role="listbox"
+      aria-label="Palette results"></ul>
+    <div class="palette-footer">
+      <span><kbd class="kbd">↑↓</kbd> navigate</span>
+      <span><kbd class="kbd">↵</kbd> open</span>
+      <span><kbd class="kbd">Esc</kbd> close</span>
+      <span class="palette-spacer"></span>
+      <span id="palette-count" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Keyboard shortcuts cheat sheet ------------------------------------ -->
+<div id="shortcuts-backdrop" class="palette-backdrop hidden"
+  role="dialog" aria-modal="true" aria-labelledby="shortcuts-title"
+  aria-hidden="true">
+  <div class="shortcuts-card">
+    <h2 id="shortcuts-title">Keyboard shortcuts</h2>
+    <button id="shortcuts-close" class="palette-close" type="button"
+      aria-label="Close shortcuts help">×</button>
+    <table class="shortcuts-table">
+      <tbody>
+        <tr><th><kbd class="kbd">⌘K</kbd> / <kbd class="kbd">Ctrl K</kbd></th>
+            <td>Open command palette — jump to anything.</td></tr>
+        <tr><th><kbd class="kbd">⌘S</kbd> / <kbd class="kbd">Ctrl S</kbd></th>
+            <td>Save the focused form (config, scenario, playbook).</td></tr>
+        <tr><th><kbd class="kbd">Esc</kbd></th>
+            <td>Close palette · cancel inline new-scenario form · close this help.</td></tr>
+        <tr><th><kbd class="kbd">?</kbd></th>
+            <td>Show this help.</td></tr>
+        <tr><th><kbd class="kbd">g</kbd> then <kbd class="kbd">b</kbd>/<kbd class="kbd">r</kbd>/<kbd class="kbd">a</kbd></th>
+            <td>Go to Build · Run · Analyze.</td></tr>
+        <tr><th><kbd class="kbd">↑</kbd>/<kbd class="kbd">↓</kbd>, <kbd class="kbd">↵</kbd> (palette)</th>
+            <td>Move through results, then open.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
 
 <main>
 
@@ -31,9 +85,35 @@
           <li><a href="#" data-builder="playbooks">Playbooks</a></li>
           <li><a href="#" data-builder="schemas">Schemas</a></li>
           <li><a href="#" data-builder="scenarios">Scenarios</a></li>
+          <li><a href="#" data-builder="share">Share &amp; reuse</a></li>
         </ul>
       </aside>
       <div class="content">
+
+        <div class="panel onboarding hidden" id="onboarding-panel">
+          <h2 id="onboarding-title">Welcome to dev-loop</h2>
+          <p class="muted" id="onboarding-subtitle">
+            Two clicks and this repo is wired up.
+          </p>
+          <ol class="checklist" id="onboarding-checklist"></ol>
+          <div class="row onboarding-cta">
+            <button id="onboarding-init">Set up this repo</button>
+            <button id="onboarding-demo" class="secondary" disabled
+              title="Available after setup">Try the demo run</button>
+            <span id="onboarding-status" class="muted"></span>
+          </div>
+          <details class="onboarding-advanced">
+            <summary>What this does</summary>
+            <ul>
+              <li>Writes <code>.dev-loop/config.yaml</code> with sane defaults.</li>
+              <li>Adds <code>.dev-loop/runs/</code> to <code>.gitignore</code>.</li>
+              <li>Installs a tiny <code>hello-dev-loop</code> replay scenario so
+                you can hit "Try the demo run" and watch a full pass-through.</li>
+            </ul>
+            <label><input type="checkbox" id="onboarding-starter" checked>
+              install starter scenario</label>
+          </details>
+        </div>
 
         <div class="panel" id="builder-overview">
           <h2>Flow overview</h2>
@@ -76,56 +156,503 @@
         <div class="panel hidden" id="builder-config">
           <h2>Repository config</h2>
           <p class="muted" id="cfg-file"></p>
-          <textarea id="cfg-textarea" rows="20" spellcheck="false"></textarea>
-          <div class="row">
+
+          <div class="cfg-mode-tabs">
+            <button data-cfg-mode="form" class="active">Form</button>
+            <button data-cfg-mode="yaml">Raw YAML</button>
+            <span class="muted" id="cfg-dirty-pill"></span>
+          </div>
+
+          <!-- Structured form ------------------------------------------- -->
+          <form id="cfg-form" class="cfg-form" autocomplete="off">
+
+            <section class="cfg-group">
+              <h3>Provider &amp; paths</h3>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-default_provider">Default provider</label>
+                <select id="cfgf-default_provider" name="default_provider">
+                  <option value="replay">replay (deterministic playback)</option>
+                  <option value="claude">claude (Claude Code CLI)</option>
+                  <option value="codex">codex (Codex CLI)</option>
+                </select>
+                <div class="cfg-help">Which agent runs when <code>--provider</code> is not passed.</div>
+              </div>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-runs_dir">Runs directory</label>
+                <input id="cfgf-runs_dir" name="runs_dir" type="text"
+                  placeholder=".dev-loop/runs">
+                <div class="cfg-help">Where per-task artifacts and the audit trail go. Relative paths resolve from the repo root.</div>
+              </div>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-scenarios_dir">Scenarios directory</label>
+                <input id="cfgf-scenarios_dir" name="scenarios_dir" type="text"
+                  placeholder="scenarios">
+                <div class="cfg-help">Where replay scenarios live, relative to the repo root.</div>
+              </div>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-sandbox_dir">Sandbox directory <span class="cfg-optional">(optional)</span></label>
+                <input id="cfgf-sandbox_dir" name="sandbox_dir" type="text"
+                  placeholder="(system tempdir)">
+                <div class="cfg-help">Disposable workspace where the agent runs. Leave blank to use the system tempdir.</div>
+              </div>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-clean_workspace_dir">Clean workspace directory <span class="cfg-optional">(optional)</span></label>
+                <input id="cfgf-clean_workspace_dir" name="clean_workspace_dir" type="text"
+                  placeholder="(system tempdir)">
+                <div class="cfg-help">Where the clean reapply happens. Leave blank to use the system tempdir.</div>
+              </div>
+            </section>
+
+            <section class="cfg-group">
+              <h3>Loop policy</h3>
+              <p class="muted cfg-section-blurb">Caps on how hard the loop will try before stopping.</p>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-max_code_iterations">Max code iterations</label>
+                <div class="cfg-num-row">
+                  <input id="cfgf-max_code_iterations" name="max_code_iterations"
+                    type="number" min="1" max="50" step="1">
+                  <span class="muted">iterations</span>
+                </div>
+                <div class="cfg-help">How many "modify code, re-validate" rounds before declaring stop. Typical: 3–8.</div>
+              </div>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-max_validation_attempts_per_iteration">Validation attempts per iteration</label>
+                <div class="cfg-num-row">
+                  <input id="cfgf-max_validation_attempts_per_iteration"
+                    name="max_validation_attempts_per_iteration"
+                    type="number" min="1" max="20" step="1">
+                  <span class="muted">attempts</span>
+                </div>
+                <div class="cfg-help">How many times to retry validation within a single iteration (e.g. flaky-test reruns).</div>
+              </div>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-max_diagnostic_rounds_per_failure">Diagnostic rounds per failure</label>
+                <div class="cfg-num-row">
+                  <input id="cfgf-max_diagnostic_rounds_per_failure"
+                    name="max_diagnostic_rounds_per_failure"
+                    type="number" min="1" max="20" step="1">
+                  <span class="muted">rounds</span>
+                </div>
+                <div class="cfg-help">How many diagnostic-fetch rounds before the loop is forced to make a code decision.</div>
+              </div>
+
+              <div class="cfg-field">
+                <label class="cfg-label" for="cfgf-max_total_wall_clock_minutes">Wall-clock budget</label>
+                <div class="cfg-num-row">
+                  <input id="cfgf-max_total_wall_clock_minutes"
+                    name="max_total_wall_clock_minutes"
+                    type="number" min="1" max="1440" step="1">
+                  <span class="muted">minutes</span>
+                </div>
+                <div class="cfg-help">Hard budget for the whole loop. The orchestrator stops once exceeded.</div>
+              </div>
+            </section>
+
+            <section class="cfg-group">
+              <h3>Notes <span class="cfg-optional">(optional)</span></h3>
+              <textarea id="cfgf-notes" name="notes" rows="3"
+                placeholder="Free-form notes about this setup (surfaced in the harness profile)."></textarea>
+            </section>
+          </form>
+
+          <!-- Raw YAML editor (toggle) ---------------------------------- -->
+          <div id="cfg-yaml-pane" class="hidden">
+            <textarea id="cfg-textarea" rows="22" spellcheck="false"></textarea>
+            <p class="muted cfg-yaml-blurb">
+              Round-trip back to the form with the "Form" tab above. Comments
+              and uncommented overrides are both preserved.
+            </p>
+          </div>
+
+          <!-- Validation banner -------------------------------------- -->
+          <div id="cfg-issues" class="cfg-issues hidden"></div>
+
+          <!-- Actions --------------------------------------------------- -->
+          <div class="row cfg-actions">
             <button id="cfg-save">Save</button>
-            <button id="cfg-reload" class="secondary">Reload</button>
+            <button id="cfg-revert" class="secondary">Revert</button>
+            <button id="cfg-test" class="secondary" title="Re-run validation now">Test config</button>
             <span id="cfg-status"></span>
           </div>
-          <details>
-            <summary>Resolved values</summary>
-            <pre id="cfg-resolved"></pre>
+
+          <!-- Resolved preview ----------------------------------------- -->
+          <details class="cfg-resolved-wrap" open>
+            <summary>Resolved values <span class="muted">(what the loop will actually use)</span></summary>
+            <div id="cfg-resolved-pretty" class="cfg-resolved-pretty"></div>
+            <details>
+              <summary class="muted">as JSON</summary>
+              <pre id="cfg-resolved"></pre>
+            </details>
           </details>
         </div>
 
         <div class="panel hidden" id="builder-capabilities">
           <h2>Capabilities</h2>
+          <div class="readonly-banner" role="note">
+            <strong>Read-only here.</strong>
+            Edit <code>harness/capabilities/registry.yaml</code> in source to
+            add or change capabilities. This view shows what the loop will
+            currently see.
+          </div>
           <p class="muted">
             External actions are gated by this registry. <code>agent_requestable</code>
             capabilities can appear in a triage's <code>diagnostic_request</code>.
             <code>forced_params</code> override anything an agent might pass.
           </p>
           <table id="cap-table">
-            <thead><tr><th>Name</th><th>Category</th><th>Agent?</th><th>Timeout</th><th>Forced params</th></tr></thead>
+            <thead><tr><th scope="col">Name</th><th scope="col">Category</th><th scope="col">Agent?</th><th scope="col">Timeout</th><th scope="col">Forced params</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
 
         <div class="panel hidden" id="builder-playbooks">
           <h2>Playbooks</h2>
-          <div class="row">
-            <select id="pb-select"></select>
-            <button id="pb-save">Save</button>
-            <span id="pb-status"></span>
+          <div class="override-banner" role="note">
+            <strong>Saves stay in this repo.</strong>
+            Changes are written to
+            <code id="pb-override-path">.dev-loop/playbooks/</code>
+            and override the built-in copy from the harness install. The
+            installed package directory is never modified.
           </div>
-          <textarea id="pb-textarea" rows="22" spellcheck="false"></textarea>
+          <div class="row">
+            <label for="pb-select" class="sr-only">Playbook</label>
+            <select id="pb-select" aria-label="Playbook"></select>
+            <button id="pb-save">Save</button>
+            <span id="pb-status" role="status" aria-live="polite"></span>
+          </div>
+          <label for="pb-textarea" class="sr-only">Playbook contents</label>
+          <textarea id="pb-textarea" rows="22" spellcheck="false"
+            aria-label="Playbook contents"></textarea>
         </div>
 
         <div class="panel hidden" id="builder-schemas">
           <h2>Schemas</h2>
-          <div class="row">
-            <select id="sch-select"></select>
+          <div class="readonly-banner" role="note">
+            <strong>Read-only here.</strong>
+            Edit JSON Schemas in source under <code>harness/schemas/*.json</code>.
+            They're vendored so the loop can validate without network access.
           </div>
-          <pre id="sch-content"></pre>
+          <div class="row">
+            <label for="sch-select" class="sr-only">Schema</label>
+            <select id="sch-select" aria-label="Schema"></select>
+          </div>
+          <pre id="sch-content" aria-label="Schema JSON"></pre>
         </div>
 
         <div class="panel hidden" id="builder-scenarios">
           <h2>Replay scenarios</h2>
-          <div class="row">
-            <select id="sc-select"></select>
-            <button id="sc-new">+ new</button>
+          <p class="muted">
+            Scenarios are canned outputs the replay agent reads back so you
+            can exercise the full loop without an LLM. Edit them as a form;
+            the four JSON files are written for you.
+          </p>
+
+          <div class="row sc-toolbar">
+            <select id="sc-select" aria-label="Select a scenario"></select>
+            <button id="sc-new-toggle" class="secondary">+ new scenario</button>
+            <button id="sc-run" title="Launch /implement against this scenario"
+              aria-label="Run this scenario">Run this scenario</button>
+            <span id="sc-dirty-pill" class="muted"></span>
           </div>
-          <div id="sc-detail"></div>
+
+          <!-- Inline new-scenario form (no prompt() dialogs) -->
+          <div id="sc-new-form" class="sc-new-form hidden">
+            <h3>Create a new scenario</h3>
+            <div class="cfg-field">
+              <label class="cfg-label" for="sc-new-name">Name (slug)</label>
+              <input id="sc-new-name" type="text"
+                placeholder="e.g. encoder-oom-001"
+                pattern="[A-Za-z0-9_.\-]+">
+              <div class="cfg-help">
+                Used as the directory name under
+                <code id="sc-new-name-hint">scenarios/</code>. Letters, digits,
+                <code>-</code>, <code>_</code> and <code>.</code> only.
+              </div>
+            </div>
+            <div class="cfg-field">
+              <label class="cfg-label" for="sc-new-goal">Implementation goal</label>
+              <input id="sc-new-goal" type="text"
+                placeholder="One-sentence description of what the agent should do.">
+              <div class="cfg-help">Becomes <code>task_contract.implementation_goal</code>.</div>
+            </div>
+            <div class="row">
+              <button id="sc-new-create">Create</button>
+              <button id="sc-new-cancel" class="secondary">Cancel</button>
+              <span id="sc-new-status" class="muted"></span>
+            </div>
+          </div>
+
+          <p class="muted hidden" id="sc-empty">
+            No scenarios yet. Create one above, or use the starter via
+            <a href="#" id="sc-empty-overview-link">Overview &gt; Set up this repo</a>.
+          </p>
+
+          <!-- Mode toggle: structured form vs raw files -->
+          <div class="cfg-mode-tabs" id="sc-mode-tabs">
+            <button data-sc-mode="form" class="active">Form</button>
+            <button data-sc-mode="raw">Raw files</button>
+            <span class="muted sc-path" id="sc-path"></span>
+          </div>
+
+          <!-- Structured form ------------------------------------------- -->
+          <form id="sc-form" class="cfg-form" autocomplete="off">
+
+            <section class="cfg-group">
+              <h3>Task request</h3>
+              <p class="muted cfg-section-blurb">
+                The user-facing prompt for this scenario, in markdown.
+              </p>
+              <div class="cfg-field" data-sc-field="task_request">
+                <textarea id="scf-task_request" rows="4"
+                  placeholder="What is the agent being asked to do?"></textarea>
+                <div class="cfg-help">
+                  Written to <code>task_request.md</code>. The first line
+                  doubles as the request shown on the Run tab.
+                </div>
+              </div>
+            </section>
+
+            <section class="cfg-group">
+              <h3>Task contract</h3>
+              <p class="muted cfg-section-blurb">
+                The agent's restatement of the task — goal, success
+                criteria, scope.
+              </p>
+              <div class="cfg-field" data-sc-field="task_contract.implementation_goal">
+                <label class="cfg-label" for="scf-goal">Implementation goal</label>
+                <input id="scf-goal" type="text"
+                  placeholder="What does success look like, in one sentence?">
+                <div class="cfg-help">Required.</div>
+              </div>
+              <div class="cfg-field" data-sc-field="task_contract.success_criteria">
+                <label class="cfg-label">Success criteria</label>
+                <div class="sc-list" data-sc-list="task_contract.success_criteria"></div>
+                <div class="cfg-help">
+                  At least one is recommended (e.g. "E2E gpu-streaming-e2e
+                  reaches PLAYING").
+                </div>
+              </div>
+              <div class="cfg-field" data-sc-field="task_contract.assumptions">
+                <label class="cfg-label">Assumptions</label>
+                <div class="sc-list" data-sc-list="task_contract.assumptions"></div>
+              </div>
+              <div class="cfg-field" data-sc-field="task_contract.non_goals">
+                <label class="cfg-label">Non-goals</label>
+                <div class="sc-list" data-sc-list="task_contract.non_goals"></div>
+              </div>
+              <div class="cfg-field" data-sc-field="task_contract.likely_components">
+                <label class="cfg-label">Likely components</label>
+                <div class="sc-list" data-sc-list="task_contract.likely_components"></div>
+              </div>
+              <div class="cfg-field" data-sc-field="task_contract.validation_plan">
+                <label class="cfg-label">Validation plan</label>
+                <div class="sc-list" data-sc-list="task_contract.validation_plan"></div>
+              </div>
+              <div class="cfg-field" data-sc-field="task_contract.ambiguities">
+                <label class="cfg-label">Ambiguities</label>
+                <div class="sc-list" data-sc-list="task_contract.ambiguities"></div>
+              </div>
+              <div class="cfg-field" data-sc-field="task_contract.can_start_without_human">
+                <label class="cfg-label">
+                  <input type="checkbox" id="scf-can_start_without_human" style="width:auto;margin-right:0.4em">
+                  Can start without human input
+                </label>
+                <div class="cfg-help">
+                  Uncheck to flag the scenario as needing clarification before
+                  the loop begins.
+                </div>
+              </div>
+            </section>
+
+            <section class="cfg-group">
+              <h3>Implementation result</h3>
+              <p class="muted cfg-section-blurb">
+                What the (replay) agent "did" — the summary, hypothesis, and
+                files it claims to have touched.
+              </p>
+              <div class="cfg-field" data-sc-field="implementation_result.summary">
+                <label class="cfg-label" for="scf-summary">Summary</label>
+                <input id="scf-summary" type="text"
+                  placeholder="One-line summary of the change.">
+              </div>
+              <div class="cfg-field" data-sc-field="implementation_result.hypothesis">
+                <label class="cfg-label" for="scf-hypothesis">Hypothesis</label>
+                <input id="scf-hypothesis" type="text"
+                  placeholder="Why this change should fix the failure.">
+              </div>
+              <div class="cfg-field" data-sc-field="implementation_result.confidence">
+                <label class="cfg-label" for="scf-confidence">Confidence</label>
+                <select id="scf-confidence">
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                </select>
+              </div>
+              <div class="cfg-field" data-sc-field="implementation_result.expected_validation">
+                <label class="cfg-label">Expected validation</label>
+                <div class="sc-list" data-sc-list="implementation_result.expected_validation"></div>
+              </div>
+              <div class="cfg-field" data-sc-field="implementation_result.risk_notes">
+                <label class="cfg-label">Risk notes</label>
+                <div class="sc-list" data-sc-list="implementation_result.risk_notes"></div>
+              </div>
+              <div class="cfg-field" data-sc-field="implementation_result.claimed_changed_files">
+                <label class="cfg-label">Claimed changed files</label>
+                <div class="sc-list" data-sc-list="implementation_result.claimed_changed_files"></div>
+              </div>
+            </section>
+
+            <section class="cfg-group">
+              <h3>E2E result</h3>
+              <p class="muted cfg-section-blurb">
+                What the replay E2E reports back. Flip the status to
+                <code>failed</code> to exercise the triage path.
+              </p>
+              <div class="cfg-field" data-sc-field="e2e_result.status">
+                <label class="cfg-label" for="scf-e2e-status">Status</label>
+                <select id="scf-e2e-status">
+                  <option value="passed">passed (loop exits clean)</option>
+                  <option value="failed">failed (triggers triage)</option>
+                </select>
+              </div>
+              <div class="cfg-field" data-sc-field="e2e_result.test_suite">
+                <label class="cfg-label" for="scf-e2e-suite">Test suite</label>
+                <input id="scf-e2e-suite" type="text"
+                  placeholder="e.g. gpu-streaming-e2e">
+              </div>
+              <div class="cfg-field" data-sc-field="e2e_result.duration_seconds">
+                <label class="cfg-label" for="scf-e2e-duration">Duration (seconds)</label>
+                <input id="scf-e2e-duration" type="number" min="0" step="1">
+              </div>
+              <div class="cfg-field hidden" id="scf-first-error-wrap"
+                data-sc-field="e2e_result.first_error">
+                <label class="cfg-label" for="scf-e2e-first-error">First error</label>
+                <input id="scf-e2e-first-error" type="text"
+                  placeholder="The error message the agent sees first.">
+                <div class="cfg-help">Shown to the triage step on failure.</div>
+              </div>
+            </section>
+
+            <section class="cfg-group">
+              <h3>Other files</h3>
+              <p class="muted cfg-section-blurb">
+                Scenario-specific fixtures and extras. Edit in raw mode.
+              </p>
+              <ul id="sc-other-files" class="sc-other-files muted"></ul>
+            </section>
+          </form>
+
+          <!-- Raw files pane (toggle) ---------------------------------- -->
+          <div id="sc-raw-pane" class="hidden">
+            <div class="row">
+              <select id="sc-file-select" aria-label="Select a file"></select>
+              <button id="sc-save-raw">Save file</button>
+              <span id="sc-raw-status" class="muted"></span>
+            </div>
+            <textarea id="sc-textarea" rows="18" spellcheck="false"></textarea>
+          </div>
+
+          <!-- Validation issues -->
+          <div id="sc-issues" class="cfg-issues hidden"></div>
+
+          <!-- Actions -->
+          <div class="row cfg-actions" id="sc-form-actions">
+            <button id="sc-save">Save scenario</button>
+            <button id="sc-revert" class="secondary">Revert</button>
+            <span id="sc-status" class="muted"></span>
+          </div>
+        </div>
+
+        <div class="panel hidden" id="builder-share">
+          <h2>Share &amp; reuse this setup</h2>
+          <p class="muted">
+            Pack <code>.dev-loop/config.yaml</code>, your scenarios, and any
+            edited playbooks into a single portable JSON file. Drop that file
+            on a teammate, paste it into a fresh clone, and you're up and
+            running in one click.
+          </p>
+
+          <section class="share-section" id="templates-section">
+            <h3>Start from a template</h3>
+            <p class="muted">
+              Curated bundles you can apply in one click. Each shows a preview
+              first — nothing is written until you confirm.
+            </p>
+            <div id="templates-strip" class="templates-strip"
+                 role="list" aria-label="Built-in templates">
+              <div class="muted" id="templates-strip-empty">loading templates…</div>
+            </div>
+          </section>
+
+          <section class="share-section">
+            <h3>Export this repo</h3>
+            <p class="muted">
+              Builds a snapshot of every config knob that's worth carrying
+              between repos. Run artifacts and built-in defaults are skipped.
+            </p>
+            <div class="row">
+              <input id="bundle-note" type="text"
+                placeholder="optional note (e.g. 'tuned for GPU triage')"
+                style="flex:1;min-width:280px">
+              <button id="bundle-download">Download bundle</button>
+              <button id="bundle-copy" class="secondary">Copy JSON</button>
+              <span id="bundle-export-status" class="muted"></span>
+            </div>
+            <p class="muted bundle-inside-label">What's inside</p>
+            <ul id="bundle-export-summary" class="muted bundle-inside-list"></ul>
+          </section>
+
+          <section class="share-section">
+            <h3>Import a bundle into this repo</h3>
+            <p class="muted">
+              Paste a bundle JSON, or drop a file. We'll show you exactly what
+              would change — new files, conflicts, and identical matches —
+              before anything is written.
+            </p>
+            <div class="row">
+              <input id="bundle-file-input" type="file" accept="application/json,.json">
+              <button id="bundle-preview-btn">Preview</button>
+              <button id="bundle-clear" class="secondary">Clear</button>
+              <span id="bundle-preview-status" class="muted"></span>
+            </div>
+            <textarea id="bundle-paste" rows="6" spellcheck="false"
+              placeholder='Paste a bundle JSON here (looks like {"format": "dev-loop-bundle", ...})'></textarea>
+
+            <div id="bundle-preview" class="hidden">
+              <div class="bundle-source muted" id="bundle-preview-source"></div>
+              <div class="bundle-totals" id="bundle-preview-totals"></div>
+              <table class="bundle-table">
+                <thead><tr>
+                  <th><input type="checkbox" id="bundle-toggle-all"
+                    aria-label="Toggle all items" checked></th>
+                  <th>status</th>
+                  <th>kind</th>
+                  <th>path</th>
+                </tr></thead>
+                <tbody id="bundle-changes"></tbody>
+              </table>
+              <div class="row">
+                <label>On conflict:
+                  <select id="bundle-on-conflict">
+                    <option value="skip">skip (keep destination)</option>
+                    <option value="overwrite">overwrite</option>
+                    <option value="rename">rename (.imported suffix)</option>
+                  </select>
+                </label>
+                <button id="bundle-apply">Apply selected</button>
+                <span id="bundle-apply-status" class="muted"></span>
+              </div>
+              <div id="bundle-apply-report"></div>
+            </div>
+          </section>
         </div>
 
       </div>
@@ -149,6 +676,10 @@
         <div id="impl-scenario-row">
           <label>Scenario (for replay)</label>
           <select id="impl-scenario"></select>
+          <p class="muted hidden" id="impl-scenario-empty">
+            No scenarios yet. <a href="#" id="impl-install-starter">Install the starter scenario</a>
+            or add one under Build &gt; Scenarios.
+          </p>
         </div>
         <label>Max iterations (optional)</label>
         <input id="impl-maxiter" type="number" min="1" max="20" placeholder="(use config)">
@@ -176,15 +707,40 @@
     <div class="cols">
       <aside class="sidebar">
         <h3>Past runs</h3>
+        <div id="run-trends" class="run-trends hidden"
+          aria-label="Per-goal trend strips"></div>
+        <input id="run-filter" type="search"
+          placeholder="filter by id, goal, or status…">
+        <div class="compare-toggle-row">
+          <label class="compare-toggle">
+            <input type="checkbox" id="compare-mode-toggle"
+              aria-label="Enable compare mode">
+            <span>Compare mode</span>
+          </label>
+          <span id="compare-pick-hint" class="muted compare-pick-hint hidden">
+            pick a 2nd run…
+          </span>
+        </div>
+        <div id="run-tally" class="run-tally muted"></div>
         <ul id="run-list" class="run-list"></ul>
       </aside>
       <div class="content">
         <div class="panel" id="analyze-empty">
-          <p class="muted">Pick a run on the left.</p>
+          <h2>Analyze runs</h2>
+          <p class="muted">
+            Pick a run on the left to see its hero summary, iterations,
+            patches, and capability audit. Every view has a copyable link
+            you can share with a teammate.
+          </p>
+          <p class="muted">
+            Tweaked your config and re-ran the same scenario? Flip
+            <strong>Compare mode</strong> on the left, pick two runs, and
+            see what actually changed — iteration counts, file lists,
+            audit volume, the works.
+          </p>
         </div>
         <div class="panel hidden" id="analyze-detail">
-          <h2 id="ad-title">—</h2>
-          <div id="ad-summary" class="summary"></div>
+          <div id="ad-hero" class="run-hero"></div>
 
           <div class="subnav">
             <button data-ad="report" class="active">Report</button>
@@ -195,8 +751,37 @@
 
           <div id="ad-report" class="ad-panel"></div>
           <div id="ad-iterations" class="ad-panel hidden"></div>
-          <div id="ad-audit" class="ad-panel hidden"><pre id="audit-pre"></pre></div>
+          <div id="ad-audit" class="ad-panel hidden">
+            <div class="row audit-controls">
+              <input id="audit-filter" type="search"
+                placeholder="filter by capability or status…">
+              <span id="audit-count" class="muted"></span>
+            </div>
+            <div id="audit-table-wrap"></div>
+          </div>
           <div id="ad-raw" class="ad-panel hidden"><pre id="raw-pre"></pre></div>
+        </div>
+        <div class="panel hidden" id="analyze-compare"
+          aria-labelledby="compare-title">
+          <div class="compare-header">
+            <h2 id="compare-title">Comparing two runs</h2>
+            <div class="row">
+              <button class="secondary copy-btn" id="compare-copy-link"
+                title="Copy a link to this comparison">Copy share link</button>
+              <button class="secondary copy-btn" id="compare-swap"
+                title="Swap which run is on the left">Swap A ↔ B</button>
+              <button class="secondary copy-btn" id="compare-exit"
+                title="Back to single-run view">Exit compare</button>
+            </div>
+          </div>
+          <div id="compare-deltas" class="compare-deltas"></div>
+          <div id="compare-heroes" class="compare-grid"></div>
+          <h3 class="compare-section">Iteration timeline</h3>
+          <div id="compare-iterations" class="compare-grid"></div>
+          <h3 class="compare-section">Changed files</h3>
+          <div id="compare-files" class="compare-files"></div>
+          <h3 class="compare-section">Audit roll-up</h3>
+          <div id="compare-audit" class="compare-grid"></div>
         </div>
       </div>
     </div>

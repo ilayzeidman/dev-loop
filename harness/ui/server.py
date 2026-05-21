@@ -5,7 +5,9 @@ Pure stdlib. Serves a single-page app plus a JSON API:
 Read endpoints
   GET  /api/config                       resolved config
   GET  /api/config/raw                   raw config.yaml text
+  GET  /api/onboarding                   first-run setup checklist
   GET  /api/runs                         list of task runs + active jobs
+  GET  /api/runs/trends                  per-goal trend buckets + sparkline data
   GET  /api/runs/<task-id>               task manifest
   GET  /api/runs/<task-id>/report        rendered Markdown report
   GET  /api/runs/<task-id>/report.json   structured report
@@ -14,22 +16,36 @@ Read endpoints
   GET  /api/runs/<task-id>/iteration/<n>/patch  patch diff text
   GET  /api/runs/<task-id>/iteration/<n>/attempts iteration attempts overview
   GET  /api/runs/<task-id>/iteration/<n>/attempt/<a>  full attempt artifact tree
+  GET  /api/runs/<a>/compare/<b>         side-by-side summary of two runs
   GET  /api/scenarios                    list of scenarios
   GET  /api/scenarios/<name>             scenario file list + previews
   GET  /api/scenarios/<name>/file/<fn>   raw scenario file
+  GET  /api/scenarios/<name>/form        structured projection of a scenario
   GET  /api/capabilities                 capability specs
   GET  /api/playbooks                    list of playbooks
   GET  /api/playbooks/<name>             raw playbook
   GET  /api/schemas                      list of schema names
   GET  /api/schemas/<name>               raw schema JSON
   GET  /api/jobs/<id>                    background job status + log
+  GET  /api/bundle/export                JSON bundle of this repo's config
+  GET  /api/bundle/templates             list built-in templates (strip cards)
+  GET  /api/bundle/templates/<id>        full bundle body for one template
+  GET  /api/palette                      unified jump-to index (Cmd+K)
 
 Write endpoints
   POST /api/config/raw                   replace config.yaml
-  POST /api/playbooks/<name>             write playbook (repo-local override)
+  POST /api/config/validate              dry-run a YAML body (no write)
+  POST /api/config/form                  render canonical YAML from a form dict
+  POST /api/init                         one-click onboarding (config + starter)
+  POST /api/playbooks/<name>             write playbook to per-repo override
+                                         ($REPO/.dev-loop/playbooks/<name>)
   POST /api/scenarios/<name>/file/<fn>   write scenario file
   POST /api/scenarios                    create new scenario dir
+  POST /api/scenarios/<name>/form        save structured form (writes 4 files)
+  POST /api/scenarios/<name>/validate    dry-run a structured form (no write)
   POST /api/implement                    launch loop in background
+  POST /api/bundle/preview               dry-run a bundle against this repo
+  POST /api/bundle/import                apply a bundle to this repo
 """
 
 from __future__ import annotations
@@ -47,9 +63,36 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from ..config import CONFIG_DIR_NAME, CONFIG_FILE_NAME, DEFAULT_CONFIG_YAML, HarnessConfig
-from ..playbooks import PLAYBOOK_DIR
+from ..bundle import (
+    BundleError,
+    apply_bundle,
+    build_bundle,
+    bundle_to_json,
+    list_templates,
+    load_template,
+    preview_apply,
+)
+from ..config import (
+    CONFIG_DIR_NAME,
+    CONFIG_FILE_NAME,
+    DEFAULT_CONFIG_YAML,
+    STARTER_SCENARIO_NAME,
+    HarnessConfig,
+    append_gitignore,
+    dump_canonical_yaml,
+    write_default_config,
+    write_starter_scenario,
+)
+from ..playbooks import PLAYBOOK_DIR, repo_playbook_dir
 from ..schemas import SCHEMA_DIR
+from ..scenarios import (
+    default_e2e_result,
+    default_implementation_result,
+    default_task_contract,
+    dump_scenario_files,
+    load_scenario_form,
+    validate_scenario_form,
+)
 from ..util import read_json
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -207,11 +250,19 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 self._serve_static(p[len("/static/"):], _guess_type(p)); return
             if p == "/api/config": self._api_config(); return
             if p == "/api/config/raw": self._api_config_raw(); return
+            if p == "/api/onboarding": self._api_onboarding(); return
             if p == "/api/runs": self._api_list_runs(); return
+            if p == "/api/runs/trends": self._api_runs_trends(); return
             if p == "/api/scenarios": self._api_list_scenarios(); return
             if p == "/api/capabilities": self._api_list_capabilities(); return
             if p == "/api/playbooks": self._api_list_playbooks(); return
             if p == "/api/schemas": self._api_list_schemas(); return
+            if p == "/api/bundle/export": self._api_bundle_export(); return
+            if p == "/api/bundle/templates": self._api_bundle_templates(); return
+            if p.startswith("/api/bundle/templates/"):
+                self._api_bundle_template_get(
+                    unquote(p[len("/api/bundle/templates/"):])); return
+            if p == "/api/palette": self._api_palette(); return
             if p.startswith("/api/runs/"):
                 self._api_run_subroute(p[len("/api/runs/"):]); return
             if p.startswith("/api/scenarios/"):
@@ -229,6 +280,16 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 self._api_implement(self._read_json_body()); return
             if p == "/api/config/raw":
                 self._api_config_raw_post(self._read_body().decode("utf-8")); return
+            if p == "/api/config/validate":
+                self._api_config_validate(self._read_body().decode("utf-8")); return
+            if p == "/api/config/form":
+                self._api_config_form(self._read_json_body()); return
+            if p == "/api/init":
+                self._api_init(self._read_json_body()); return
+            if p == "/api/bundle/preview":
+                self._api_bundle_preview(self._read_json_body()); return
+            if p == "/api/bundle/import":
+                self._api_bundle_import(self._read_json_body()); return
             if p == "/api/scenarios":
                 self._api_scenario_create(self._read_json_body()); return
             if p.startswith("/api/playbooks/"):
@@ -236,7 +297,15 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                     unquote(p[len("/api/playbooks/"):]),
                     self._read_body().decode("utf-8")); return
             if p.startswith("/api/scenarios/"):
-                self._api_scenario_file_post(p[len("/api/scenarios/"):],
+                sub = p[len("/api/scenarios/"):]
+                parts = sub.split("/", 2)
+                if len(parts) == 2 and parts[1] == "form":
+                    self._api_scenario_form_post(parts[0], self._read_json_body())
+                    return
+                if len(parts) == 2 and parts[1] == "validate":
+                    self._api_scenario_form_validate(parts[0], self._read_json_body())
+                    return
+                self._api_scenario_file_post(sub,
                                              self._read_body().decode("utf-8"))
                 return
             self._send_text(404, "not found")
@@ -300,6 +369,288 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             (cd / CONFIG_FILE_NAME).write_text(text, encoding="utf-8")
             self._send_json(200, {"ok": True})
 
+        def _api_config_validate(self, text: str) -> None:
+            """Dry-run a config body. Never writes; reports issues + resolved.
+
+            Powers the live preview underneath the Build > Config form so a
+            typo lights up before the user hits Save. Always returns 200
+            with ``ok`` (true iff there are no ``error``-level issues).
+            """
+            import yaml
+            issues: list[dict[str, str]] = []
+            raw: Any = {}
+            try:
+                raw = yaml.safe_load(text) if text.strip() else {}
+            except yaml.YAMLError as e:
+                self._send_json(200, {
+                    "ok": False,
+                    "issues": [{"level": "error", "field": "_yaml",
+                                "message": f"invalid YAML: {e}"}],
+                    "form": None, "resolved": None,
+                })
+                return
+            if raw is None:
+                raw = {}
+            if not isinstance(raw, dict):
+                self._send_json(200, {
+                    "ok": False,
+                    "issues": [{"level": "error", "field": "_root",
+                                "message": "top-level must be a mapping"}],
+                    "form": None, "resolved": None,
+                })
+                return
+            cfg, more = HarnessConfig.from_dict_with_issues(raw)
+            issues.extend(more)
+            r = cfg.resolved(repo)
+            self._send_json(200, {
+                "ok": not any(i["level"] == "error" for i in issues),
+                "issues": issues,
+                "form": _config_to_form(cfg),
+                "resolved": {
+                    "runs_dir": str(r.runs_dir),
+                    "sandbox_dir": str(r.sandbox_dir),
+                    "clean_workspace_dir": str(r.clean_workspace_dir),
+                    "scenarios_dir": str(r.scenarios_dir),
+                    "default_provider": r.default_provider,
+                    "policy": {
+                        "max_code_iterations": r.policy.max_code_iterations,
+                        "max_validation_attempts_per_iteration":
+                            r.policy.max_validation_attempts_per_iteration,
+                        "max_diagnostic_rounds_per_failure":
+                            r.policy.max_diagnostic_rounds_per_failure,
+                        "max_total_wall_clock_minutes":
+                            r.policy.max_total_wall_clock_minutes,
+                    },
+                    "notes": cfg.notes,
+                },
+            })
+
+        def _api_config_form(self, body: Any) -> None:
+            """Convert a structured form dict to canonical YAML.
+
+            Body matches ``_config_to_form`` output (flat scalar fields).
+            Returns the YAML text and a fresh validation report so the
+            client can show both panes in one call.
+            """
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "body must be a JSON object"}); return
+            # Reconstruct a HarnessConfig-shaped dict from the form fields.
+            # Policy fields stay top-level (HarnessConfig.from_dict_with_issues
+            # accepts that and we want stable round-tripping).
+            form = dict(body)
+            cfg, issues = HarnessConfig.from_dict_with_issues(form)
+            yaml_text = dump_canonical_yaml(cfg)
+            r = cfg.resolved(repo)
+            self._send_json(200, {
+                "ok": not any(i["level"] == "error" for i in issues),
+                "yaml": yaml_text,
+                "issues": issues,
+                "form": _config_to_form(cfg),
+                "resolved": {
+                    "runs_dir": str(r.runs_dir),
+                    "sandbox_dir": str(r.sandbox_dir),
+                    "clean_workspace_dir": str(r.clean_workspace_dir),
+                    "scenarios_dir": str(r.scenarios_dir),
+                    "default_provider": r.default_provider,
+                    "policy": {
+                        "max_code_iterations": r.policy.max_code_iterations,
+                        "max_validation_attempts_per_iteration":
+                            r.policy.max_validation_attempts_per_iteration,
+                        "max_diagnostic_rounds_per_failure":
+                            r.policy.max_diagnostic_rounds_per_failure,
+                        "max_total_wall_clock_minutes":
+                            r.policy.max_total_wall_clock_minutes,
+                    },
+                    "notes": cfg.notes,
+                },
+            })
+
+        # ----- onboarding --------------------------------------------
+
+        def _api_onboarding(self) -> None:
+            """Snapshot of how 'set up' this repo is.
+
+            Drives the first-run wizard so a brand new user sees what's
+            done and what's still needed without leaving the UI.
+            """
+            cfg, r = _resolved()
+            cf = repo / CONFIG_DIR_NAME / CONFIG_FILE_NAME
+            config_exists = cf.exists()
+            scenarios_dir = r.scenarios_dir
+            scenario_names: list[str] = []
+            if scenarios_dir.exists():
+                scenario_names = sorted(
+                    d.name for d in scenarios_dir.iterdir() if d.is_dir()
+                )
+            runs_dir = r.runs_dir
+            run_count = 0
+            if runs_dir.exists():
+                run_count = sum(
+                    1 for d in runs_dir.iterdir()
+                    if d.is_dir() and (d / "task_manifest.json").exists()
+                )
+            gi = repo / ".gitignore"
+            gitignored = (
+                gi.exists() and ".dev-loop/runs/" in gi.read_text(encoding="utf-8")
+            )
+            steps = [
+                {
+                    "id": "config",
+                    "title": "Create .dev-loop/config.yaml",
+                    "done": config_exists,
+                    "detail": str(cf),
+                },
+                {
+                    "id": "gitignore",
+                    "title": "Ignore run artifacts in git",
+                    "done": gitignored,
+                    "detail": str(gi),
+                },
+                {
+                    "id": "scenarios",
+                    "title": "Install a replay scenario to try",
+                    "done": bool(scenario_names),
+                    "detail": str(scenarios_dir),
+                    "scenarios": scenario_names,
+                },
+                {
+                    "id": "first_run",
+                    "title": "Run your first /implement loop",
+                    "done": run_count > 0,
+                    "detail": f"{run_count} run(s) recorded",
+                },
+            ]
+            is_complete = all(s["done"] for s in steps)
+            self._send_json(200, {
+                "repo": str(repo),
+                "repo_name": repo.name,
+                "config_exists": config_exists,
+                "gitignored": gitignored,
+                "scenarios": scenario_names,
+                "run_count": run_count,
+                "starter_scenario": STARTER_SCENARIO_NAME,
+                "starter_installed": STARTER_SCENARIO_NAME in scenario_names,
+                "default_provider": r.default_provider,
+                "is_complete": is_complete,
+                "steps": steps,
+            })
+
+        def _api_init(self, body: Any) -> None:
+            """One-click setup. Idempotent.
+
+            Body (all optional):
+              install_starter: bool   default True — copy hello-dev-loop scenario
+              force: bool             default False — overwrite an existing config
+            """
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "body must be a JSON object"}); return
+            install_starter = bool(body.get("install_starter", True))
+            force = bool(body.get("force", False))
+            actions: list[str] = []
+            cf, created = write_default_config(repo, force=force)
+            if created:
+                actions.append(f"wrote {cf}")
+            elif force:
+                actions.append(f"overwrote {cf}")
+            else:
+                actions.append(f"kept existing {cf}")
+            if append_gitignore(repo):
+                actions.append("updated .gitignore")
+            if install_starter:
+                _, r = _resolved()
+                sp = write_starter_scenario(r.scenarios_dir)
+                actions.append(f"installed starter scenario at {sp}")
+            self._send_json(200, {"ok": True, "actions": actions})
+
+        # ----- bundle (share config between repos) -------------------
+
+        def _api_bundle_export(self) -> None:
+            """Return this repo's exportable bundle.
+
+            Served as ``application/json`` with a ``Content-Disposition``
+            header so a browser save-as drops it into a sensibly-named
+            file. The bundle is a pure JSON object.
+            """
+            bundle = build_bundle(repo)
+            body = bundle_to_json(bundle).encode("utf-8")
+            filename = f"{repo.name}-dev-loop-bundle.json"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header(
+                "Content-Disposition",
+                f'attachment; filename="{filename}"',
+            )
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _api_bundle_templates(self) -> None:
+            """Strip-card metadata for every built-in template.
+
+            One round-trip so the Share & reuse tab can render the
+            horizontal strip without per-template probes. The full
+            bundle body is fetched lazily by ``/api/bundle/templates/<id>``
+            when the user clicks a card.
+            """
+            self._send_json(200, {"templates": list_templates()})
+
+        def _api_bundle_template_get(self, template_id: str) -> None:
+            """Full bundle body for one template — feeds into the existing
+            preview / import pipeline so the client renders the diff with
+            ``/api/bundle/preview`` exactly as it does for user uploads."""
+            try:
+                bundle = load_template(template_id)
+            except BundleError as e:
+                self._send_json(404, {"error": str(e)}); return
+            self._send_json(200, {"bundle": bundle})
+
+        def _api_bundle_preview(self, body: Any) -> None:
+            """Dry-run an incoming bundle. Returns the diff vs. this repo.
+
+            Body: ``{"bundle": <bundle-object>}`` — the bundle as a parsed
+            JSON object so the client can paste, type or upload it.
+            """
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "body must be a JSON object"}); return
+            bundle = body.get("bundle")
+            if bundle is None:
+                self._send_json(400, {"error": "missing 'bundle' field"}); return
+            try:
+                preview = preview_apply(bundle, repo)
+            except BundleError as e:
+                self._send_json(400, {"error": str(e)}); return
+            self._send_json(200, preview)
+
+        def _api_bundle_import(self, body: Any) -> None:
+            """Apply an incoming bundle.
+
+            Body fields:
+              ``bundle``       — required, the parsed bundle object
+              ``on_conflict``  — ``skip`` (default), ``overwrite`` or
+                                 ``rename``
+              ``include``      — optional list of display paths to limit
+                                 the write to (per-item UI checkboxes)
+            """
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "body must be a JSON object"}); return
+            bundle = body.get("bundle")
+            if bundle is None:
+                self._send_json(400, {"error": "missing 'bundle' field"}); return
+            on_conflict = body.get("on_conflict") or "skip"
+            include = body.get("include")
+            if include is not None and not isinstance(include, list):
+                self._send_json(400, {"error": "'include' must be a list of strings"}); return
+            try:
+                report = apply_bundle(
+                    bundle, repo,
+                    on_conflict=on_conflict,
+                    include=include,
+                )
+            except BundleError as e:
+                self._send_json(400, {"error": str(e)}); return
+            self._send_json(200, report)
+
         # ----- runs ---------------------------------------------------
 
         def _api_list_runs(self) -> None:
@@ -317,6 +668,7 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                         data = read_json(tm)
                     except Exception:
                         continue
+                    tc = data.get("task_contract") or {}
                     out.append({
                         "task_id": data.get("task_id", d.name),
                         "status": data.get("status"),
@@ -325,8 +677,14 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                         "created_at_utc": data.get("created_at_utc"),
                         "updated_at_utc": data.get("updated_at_utc"),
                         "iterations": _count_iterations(d),
+                        "goal": tc.get("implementation_goal"),
+                        "duration_seconds": _run_duration_seconds(data),
                     })
             self._send_json(200, {"runs": out, "jobs": jobs.list()})
+
+        def _api_runs_trends(self) -> None:
+            _, r = _resolved()
+            self._send_json(200, _summarize_trends(r.runs_dir))
 
         def _api_run_subroute(self, sub: str) -> None:
             _, r = _resolved()
@@ -339,6 +697,8 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             if len(parts) == 1:
                 self._send_json(200, read_json(run_root / "task_manifest.json")); return
             section = parts[1]
+            if section == "compare" and len(parts) >= 3:
+                self._api_compare_runs(task_id, parts[2]); return
             if section == "report":
                 md = run_root / "final_review_report.md"
                 self._send_text(200, md.read_text(encoding="utf-8") if md.exists() else "(no report yet)",
@@ -371,6 +731,27 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                     self._send_json(200, _attempt_dump(iter_dir / "validations" / f"attempt-{a:03d}"))
                     return
             self._send_text(404, "not found")
+
+        # ----- compare two runs --------------------------------------
+
+        def _api_compare_runs(self, a: str, b: str) -> None:
+            """Side-by-side digest of two runs.
+
+            Returns a single payload so the client renders both columns
+            without chasing per-iteration / audit endpoints twice. The
+            shapes on each side are symmetric; either may be ``None`` if
+            the run doesn't exist, so the UI can show "missing" rather
+             than crashing on a stale share link.
+            """
+            _, r = _resolved()
+            sa = _summarize_run_for_compare(r.runs_dir, a)
+            sb = _summarize_run_for_compare(r.runs_dir, b)
+            if sa is None and sb is None:
+                self._send_json(404, {"error": "neither run exists"}); return
+            self._send_json(200, {
+                "a": sa, "b": sb,
+                "deltas": _compare_deltas(sa, sb),
+            })
 
         # ----- scenarios ---------------------------------------------
 
@@ -415,6 +796,16 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                     elif f.is_dir():
                         files.append({"name": f.name + "/", "size": None})
                 self._send_json(200, {"name": name, "path": str(d), "files": files}); return
+            if parts[1] == "form" and len(parts) == 2:
+                form = load_scenario_form(d)
+                issues = [i.to_dict() for i in validate_scenario_form(form.to_dict())]
+                self._send_json(200, {
+                    "form": form.to_dict(),
+                    "path": str(d),
+                    "issues": issues,
+                    "ok": not any(i["level"] == "error" for i in issues),
+                })
+                return
             if parts[1] == "file" and len(parts) == 3:
                 f = (d / parts[2]).resolve()
                 if not _is_within(f, sc_dir):
@@ -461,26 +852,83 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 self._send_text(403, "forbidden"); return
             if d.exists():
                 self._send_json(400, {"error": "already exists"}); return
+            # Build the initial form from anything the caller passed and
+            # let ``dump_scenario_files`` write the canonical files. This
+            # keeps "create" and "save" on the same code path.
+            request = body.get("task_request") or f"# {name}\n\nDescribe the request here.\n"
+            goal = (body.get("implementation_goal") or "").strip()
+            if not goal:
+                goal = request.strip().splitlines()[0].lstrip("# ").strip() or name
+            tc = default_task_contract()
+            tc["implementation_goal"] = goal
+            form = {
+                "task_request": request,
+                "task_contract": tc,
+                "implementation_result": default_implementation_result(),
+                "e2e_result": default_e2e_result(),
+                "extras": {},
+            }
             d.mkdir(parents=True)
-            (d / "task_request.md").write_text(
-                body.get("task_request", f"# {name}\n\nDescribe the request here.\n"),
-                encoding="utf-8")
-            (d / "task_contract.json").write_text(json.dumps({
-                "type": "task_contract",
-                "implementation_goal": body.get("task_request", "").strip() or name,
-                "assumptions": [],
-                "success_criteria": ["E2E passes"],
-                "non_goals": [],
-                "likely_components": [],
-                "validation_plan": [],
-                "ambiguities": [],
-                "can_start_without_human": True,
-            }, indent=2) + "\n", encoding="utf-8")
-            (d / "e2e_result.json").write_text(json.dumps({
-                "status": "passed",
-                "test_suite": "stub-e2e",
-            }, indent=2) + "\n", encoding="utf-8")
+            for fname, text in dump_scenario_files(form).items():
+                (d / fname).write_text(text, encoding="utf-8")
             self._send_json(200, {"ok": True, "name": name, "path": str(d)})
+
+        def _api_scenario_form_post(self, name: str, body: Any) -> None:
+            """Save a structured scenario form.
+
+            Validates, then writes the four projected files atomically
+            (via a temp-and-replace dance per file). Extras are merged
+            back in by ``dump_scenario_files`` so power-user fields are
+            preserved.
+            """
+            if not _valid_scenario_name(name):
+                self._send_json(400, {"error": "invalid scenario name"}); return
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "body must be a JSON object"}); return
+            form = body.get("form")
+            if not isinstance(form, dict):
+                self._send_json(400, {"error": "missing 'form' object"}); return
+            _, r = _resolved()
+            sc_dir = r.scenarios_dir
+            d = sc_dir / name
+            if not _is_within(d, sc_dir):
+                self._send_text(403, "forbidden"); return
+            if not d.exists() or not d.is_dir():
+                self._send_json(404, {"error": "scenario not found"}); return
+            issues = [i.to_dict() for i in validate_scenario_form(form)]
+            errors = [i for i in issues if i["level"] == "error"]
+            if errors:
+                self._send_json(400, {
+                    "ok": False, "issues": issues, "error": "validation failed",
+                })
+                return
+            files = dump_scenario_files(form)
+            for fname, text in files.items():
+                _atomic_write_text(d / fname, text)
+            # Echo back a fresh form so the client picks up any
+            # normalization (defaults filled in, etc.).
+            fresh = load_scenario_form(d)
+            self._send_json(200, {
+                "ok": True,
+                "issues": issues,
+                "written": sorted(files.keys()),
+                "form": fresh.to_dict(),
+            })
+
+        def _api_scenario_form_validate(self, name: str, body: Any) -> None:
+            """Dry-run validation for the form. Never writes."""
+            if not _valid_scenario_name(name):
+                self._send_json(400, {"error": "invalid scenario name"}); return
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "body must be a JSON object"}); return
+            form = body.get("form")
+            if not isinstance(form, dict):
+                self._send_json(400, {"error": "missing 'form' object"}); return
+            issues = [i.to_dict() for i in validate_scenario_form(form)]
+            self._send_json(200, {
+                "ok": not any(i["level"] == "error" for i in issues),
+                "issues": issues,
+            })
 
         # ----- capabilities, playbooks, schemas -----------------------
 
@@ -502,35 +950,62 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             self._send_json(200, {"capabilities": specs})
 
         def _api_list_playbooks(self) -> None:
-            files = sorted(p.name for p in PLAYBOOK_DIR.glob("*.md"))
-            self._send_json(200, {"playbooks": files})
+            override_dir = repo_playbook_dir(repo)
+            names: set[str] = set()
+            names.update(p.name for p in PLAYBOOK_DIR.glob("*.md"))
+            if override_dir.exists():
+                names.update(p.name for p in override_dir.glob("*.md"))
+            playbooks = []
+            for name in sorted(names):
+                playbooks.append({
+                    "name": name,
+                    "overridden": (override_dir / name).exists(),
+                })
+            self._send_json(200, {
+                "playbooks": playbooks,
+                "override_dir": str(override_dir.relative_to(repo))
+                                 if override_dir.is_relative_to(repo)
+                                 else str(override_dir),
+            })
 
         def _api_playbook_get(self, name: str) -> None:
-            f = (PLAYBOOK_DIR / name).resolve()
-            try:
-                f.relative_to(PLAYBOOK_DIR.resolve())
-            except ValueError:
+            if "/" in name or "\\" in name or name.startswith("."):
                 self._send_text(403, "forbidden"); return
-            if not f.exists():
-                self._send_text(404, "not found"); return
-            self._send_text(200, f.read_text(encoding="utf-8"), "text/markdown; charset=utf-8")
+            override = repo_playbook_dir(repo) / name
+            pkg = PLAYBOOK_DIR / name
+            for f in (override, pkg):
+                if f.exists():
+                    self._send_text(
+                        200, f.read_text(encoding="utf-8"),
+                        "text/markdown; charset=utf-8",
+                    )
+                    return
+            self._send_text(404, "not found")
 
         def _api_playbook_post(self, name: str, text: str) -> None:
-            # Saved into the harness package dir (the repo where dev-loop
-            # lives). For per-repo overrides users would maintain their own
-            # fork — that's intentional for v1.
-            f = (PLAYBOOK_DIR / name).resolve()
+            # Writes go to the per-repo override at
+            # ``$REPO/.dev-loop/playbooks/<name>``. The installed harness
+            # package directory is never modified by the UI, so edits stay
+            # scoped to this repo. ``load_playbook`` checks the override
+            # first, so in-process agent runs (when passed ``repo=``) see
+            # the new text on the next call.
+            if "/" in name or "\\" in name or name.startswith("."):
+                self._send_text(403, "forbidden"); return
+            override_dir = repo_playbook_dir(repo)
+            override_dir.mkdir(parents=True, exist_ok=True)
+            f = (override_dir / name).resolve()
             try:
-                f.relative_to(PLAYBOOK_DIR.resolve())
+                f.relative_to(override_dir.resolve())
             except ValueError:
                 self._send_text(403, "forbidden"); return
             f.write_text(text, encoding="utf-8")
-            # Bust the in-process ``lru_cache`` on ``load_playbook`` so any
-            # in-process consumer (tests, future in-proc agent runner) sees
-            # the new text on the next call.
             from ..playbooks import load_playbook
             load_playbook.cache_clear()
-            self._send_json(200, {"ok": True})
+            self._send_json(200, {
+                "ok": True,
+                "written": str(f.relative_to(repo))
+                            if f.is_relative_to(repo) else str(f),
+            })
 
         def _api_list_schemas(self) -> None:
             files = sorted(p.name for p in SCHEMA_DIR.glob("*.json"))
@@ -546,6 +1021,189 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 self._send_text(404, "not found"); return
             self._send_text(200, f.read_text(encoding="utf-8"),
                             "application/json; charset=utf-8")
+
+        # ----- command palette (Cmd+K) -------------------------------
+
+        def _api_palette(self) -> None:
+            """Unified jump-to index for the Cmd+K command palette.
+
+            One round-trip returns every destination the user might want to
+            jump to: tabs, builder sections, run-tab subviews, every
+            scenario (with its goal), every playbook, every schema, every
+            recent run (newest 60, with status + goal), and a small set of
+            verb-style quick actions. The client fuzzy-matches client-side;
+            this endpoint just gathers the corpus so we don't have to
+            chase three other endpoints to populate the palette.
+            """
+            _, r = _resolved()
+            items: list[dict[str, Any]] = []
+
+            # 1. Tabs.
+            for tab, label, hint in (
+                ("build", "Build", "configure this repo"),
+                ("run", "Run", "launch a /implement loop"),
+                ("analyze", "Analyze", "browse past runs"),
+            ):
+                items.append({
+                    "kind": "tab", "id": tab, "title": label,
+                    "subtitle": hint, "group": "Tabs",
+                    "keywords": f"go to {label.lower()}",
+                })
+
+            # 2. Builder sections.
+            for sec, label, hint in (
+                ("overview", "Overview", "flow + onboarding"),
+                ("config", "Config", ".dev-loop/config.yaml"),
+                ("capabilities", "Capabilities",
+                 "registered external actions"),
+                ("playbooks", "Playbooks", "agent prompts"),
+                ("schemas", "Schemas", "JSON schemas"),
+                ("scenarios", "Scenarios", "replay fixtures"),
+                ("share", "Share & reuse", "export/import bundles"),
+            ):
+                items.append({
+                    "kind": "builder", "id": sec,
+                    "title": f"Build · {label}",
+                    "subtitle": hint, "group": "Build sections",
+                    "keywords": f"build {label.lower()} {sec}",
+                })
+
+            # 3. Run-tab subviews (only useful when a run is open, but
+            # listing them lets the user keyboard-jump from anywhere).
+            for sub, label in (
+                ("report", "Report"), ("iterations", "Iterations"),
+                ("audit", "Audit log"), ("raw", "Raw report"),
+            ):
+                items.append({
+                    "kind": "subview", "id": sub,
+                    "title": f"Analyze · {label}",
+                    "subtitle": "open in current run",
+                    "group": "Analyze subviews",
+                    "keywords": f"analyze {label.lower()}",
+                })
+
+            # 4. Scenarios — read each one's goal for matching.
+            sc_dir = r.scenarios_dir
+            if sc_dir.exists():
+                for d in sorted(sc_dir.iterdir()):
+                    if not d.is_dir():
+                        continue
+                    goal = ""
+                    tc_path = d / "task_contract.json"
+                    if tc_path.exists():
+                        try:
+                            tc = read_json(tc_path)
+                            goal = (tc.get("implementation_goal") or "")[:120]
+                        except Exception:
+                            goal = ""
+                    items.append({
+                        "kind": "scenario", "id": d.name,
+                        "title": d.name,
+                        "subtitle": goal or "(no goal recorded)",
+                        "group": "Scenarios",
+                        "keywords": f"scenario replay {d.name} {goal}",
+                    })
+
+            # 5. Playbooks + schemas (lightweight, just filenames).
+            pb_names: set[str] = set()
+            pb_names.update(p.name for p in PLAYBOOK_DIR.glob("*.md"))
+            override_pb = repo_playbook_dir(repo)
+            if override_pb.exists():
+                pb_names.update(p.name for p in override_pb.glob("*.md"))
+            for name in sorted(pb_names):
+                overridden = (override_pb / name).exists()
+                items.append({
+                    "kind": "playbook", "id": name, "title": name,
+                    "subtitle": "playbook (repo override)" if overridden else "playbook",
+                    "group": "Playbooks",
+                    "keywords": f"playbook {name}",
+                })
+            for p in sorted(SCHEMA_DIR.glob("*.json")):
+                items.append({
+                    "kind": "schema", "id": p.name, "title": p.name,
+                    "subtitle": "schema", "group": "Schemas",
+                    "keywords": f"schema {p.name}",
+                })
+
+            # 6. Recent runs — newest first, capped at 60 to keep payload tiny.
+            runs_dir = r.runs_dir
+            if runs_dir.exists():
+                run_dirs = sorted(
+                    (d for d in runs_dir.iterdir() if d.is_dir()),
+                    reverse=True,
+                )
+                for d in run_dirs[:60]:
+                    tm = d / "task_manifest.json"
+                    if not tm.exists():
+                        continue
+                    try:
+                        data = read_json(tm)
+                    except Exception:
+                        continue
+                    tc = data.get("task_contract") or {}
+                    status = (data.get("final_status")
+                              or data.get("status") or "")
+                    goal = (tc.get("implementation_goal") or "")[:120]
+                    items.append({
+                        "kind": "run", "id": data.get("task_id", d.name),
+                        "title": data.get("task_id", d.name),
+                        "subtitle": (
+                            f"[{status}] {goal}" if status else goal
+                        ) or "(no contract)",
+                        "group": "Runs",
+                        "status": status,
+                        "keywords": f"run {data.get('task_id', d.name)} "
+                                    f"{status} {goal}",
+                    })
+
+            # 7. Verb-style quick actions. These do something rather than
+            # navigate, but live in the same palette to keep one keyboard
+            # shortcut for "do anything".
+            items.append({
+                "kind": "action", "id": "scenario.new",
+                "title": "New scenario…",
+                "subtitle": "create a replay fixture",
+                "group": "Actions",
+                "keywords": "new scenario create add replay",
+            })
+            items.append({
+                "kind": "action", "id": "compare.runs",
+                "title": "Compare two runs…",
+                "subtitle": "diff hero, iterations, audit side-by-side",
+                "group": "Actions",
+                "keywords": "compare diff two runs side by side delta analyze",
+            })
+            items.append({
+                "kind": "action", "id": "trends.show",
+                "title": "Show goal trends",
+                "subtitle": "per-goal sparkline of pass-rate + iteration count",
+                "group": "Actions",
+                "keywords": "trends sparkline history pass rate analyze graph",
+            })
+            items.append({
+                "kind": "action", "id": "shortcuts.help",
+                "title": "Keyboard shortcuts",
+                "subtitle": "show the cheat-sheet",
+                "group": "Actions",
+                "keywords": "help shortcuts keys cheat sheet",
+            })
+
+            # 8. Templates — one entry per built-in starter bundle so users
+            # can keyboard-jump straight into "preview & apply this template"
+            # without first navigating to Share & reuse.
+            for t in list_templates():
+                items.append({
+                    "kind": "template", "id": t["id"],
+                    "title": f"Template · {t['title']}",
+                    "subtitle": t["summary"] or "starter bundle",
+                    "group": "Templates",
+                    "keywords": (
+                        f"template starter bundle apply {t['id']} "
+                        f"{t['title']} {' '.join(t.get('tags') or [])}"
+                    ),
+                })
+
+            self._send_json(200, {"items": items})
 
         # ----- jobs / implement --------------------------------------
 
@@ -586,6 +1244,24 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
     return Handler
 
 
+def _config_to_form(cfg: HarnessConfig) -> dict[str, Any]:
+    """Flat dict the Build > Config form binds to. One key per input."""
+    return {
+        "runs_dir": cfg.runs_dir,
+        "default_provider": cfg.default_provider,
+        "scenarios_dir": cfg.scenarios_dir,
+        "sandbox_dir": cfg.sandbox_dir,
+        "clean_workspace_dir": cfg.clean_workspace_dir,
+        "notes": cfg.notes,
+        "max_code_iterations": cfg.max_code_iterations,
+        "max_validation_attempts_per_iteration":
+            cfg.max_validation_attempts_per_iteration,
+        "max_diagnostic_rounds_per_failure":
+            cfg.max_diagnostic_rounds_per_failure,
+        "max_total_wall_clock_minutes": cfg.max_total_wall_clock_minutes,
+    }
+
+
 def _valid_scenario_name(name: str) -> bool:
     """A scenario name must be a single safe path segment.
 
@@ -601,6 +1277,21 @@ def _valid_scenario_name(name: str) -> bool:
         if bad in name:
             return False
     return True
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` via temp-and-replace.
+
+    Per-file atomicity matters for the scenario form save: a four-file
+    write that's interrupted half-way should leave each file either
+    fully written (new bytes) or fully untouched (old bytes), never
+    truncated. ``os.replace`` is atomic on POSIX and Windows.
+    """
+    import os
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _is_within(p: Path, root: Path) -> bool:
@@ -622,6 +1313,24 @@ def _read_safe_json(p: Path) -> Any:
         return {"_error": str(e)}
 
 
+def _run_duration_seconds(manifest: dict[str, Any]) -> int | None:
+    """Wall-clock seconds between ``created_at_utc`` and ``updated_at_utc``.
+
+    Returns ``None`` if either timestamp is missing or unparseable so the
+    UI can render an em dash rather than a misleading zero.
+    """
+    a = manifest.get("created_at_utc")
+    b = manifest.get("updated_at_utc")
+    if not a or not b:
+        return None
+    try:
+        ta = datetime.strptime(a, "%Y-%m-%dT%H:%M:%SZ")
+        tb = datetime.strptime(b, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return None
+    return max(0, int((tb - ta).total_seconds()))
+
+
 def _count_iterations(run_dir: Path) -> int:
     iters = run_dir / "iterations"
     if not iters.exists():
@@ -630,6 +1339,305 @@ def _count_iterations(run_dir: Path) -> int:
     # (e.g. a .DS_Store from a checkout, or a tmp scratch file) must not
     # inflate the count or skew downstream summaries.
     return sum(1 for d in iters.iterdir() if d.is_dir())
+
+
+def _summarize_run_for_compare(runs_dir: Path, task_id: str) -> dict[str, Any] | None:
+    """Compact summary used by the cross-run compare view.
+
+    Returns ``None`` when the run dir or manifest is missing so the
+    endpoint can return a partial payload (missing-A or missing-B)
+    rather than 404'ing the whole comparison — that's what keeps a
+    stale share link from blanking the page.
+    """
+    run_root = runs_dir / task_id
+    tm_path = run_root / "task_manifest.json"
+    if not run_root.exists() or not tm_path.exists():
+        return None
+    try:
+        tm = read_json(tm_path)
+    except Exception:
+        return None
+    tc = tm.get("task_contract") or {}
+    iters: list[dict[str, Any]] = []
+    iters_dir = run_root / "iterations"
+    if iters_dir.exists():
+        for d in sorted(d for d in iters_dir.iterdir() if d.is_dir()):
+            im = _read_safe_json(d / "manifest.json")
+            if not isinstance(im, dict):
+                im = {}
+            code = (im.get("code") or {}) if isinstance(im.get("code"), dict) else {}
+            agent_out = im.get("agent_output") or {}
+            summary = ""
+            if isinstance(agent_out, dict):
+                summary = agent_out.get("summary") or ""
+            v = d / "validations"
+            attempt_count = (
+                sum(1 for x in v.iterdir() if x.is_dir())
+                if v.exists() else 0
+            )
+            # Iteration number is the trailing integer of ``iter-NNN``.
+            try:
+                n = int(d.name.rsplit("-", 1)[1])
+            except (IndexError, ValueError):
+                n = len(iters) + 1
+            iters.append({
+                "i": n,
+                "final_e2e_status": im.get("final_e2e_status"),
+                "summary": summary[:240] if isinstance(summary, str) else "",
+                "changed_files": list(code.get("changed_files") or []),
+                "patch_hash": code.get("patch_hash"),
+                "attempts": attempt_count,
+            })
+
+    # Audit roll-up — counts by status and a short list of capability
+    # names so the user can see at-a-glance which side did more work.
+    audit_path = run_root / "capability_audit.jsonl"
+    audit_by_status: dict[str, int] = {}
+    audit_by_capability: dict[str, int] = {}
+    audit_total = 0
+    if audit_path.exists():
+        for line in audit_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except Exception:
+                continue
+            audit_total += 1
+            status = entry.get("status") or "?"
+            audit_by_status[status] = audit_by_status.get(status, 0) + 1
+            cap = entry.get("capability") or "?"
+            audit_by_capability[cap] = audit_by_capability.get(cap, 0) + 1
+
+    return {
+        "task_id": tm.get("task_id", task_id),
+        "status": tm.get("status"),
+        "final_status": tm.get("final_status"),
+        "stop_reason": tm.get("stop_reason"),
+        "selected_iteration": tm.get("selected_iteration"),
+        "created_at_utc": tm.get("created_at_utc"),
+        "updated_at_utc": tm.get("updated_at_utc"),
+        "duration_seconds": _run_duration_seconds(tm),
+        "goal": tc.get("implementation_goal"),
+        "scenario": tc.get("scenario") or tm.get("scenario"),
+        "iteration_count": len(iters),
+        "iterations": iters,
+        "audit": {
+            "total": audit_total,
+            "by_status": audit_by_status,
+            "by_capability": audit_by_capability,
+        },
+    }
+
+
+def _compare_deltas(a: dict[str, Any] | None,
+                    b: dict[str, Any] | None) -> dict[str, Any]:
+    """High-level summary of what changed from ``a`` to ``b``.
+
+    Pure function over the summary shape so we can keep the analysis
+    server-side (one source of truth) and the client just renders.
+    Every value is either a scalar or a small string so the payload
+    stays a flat dict friendly to React-less DOM building.
+    """
+    if a is None or b is None:
+        return {"both_present": False}
+    # Iteration count delta (positive = b took more iterations).
+    di = (b["iteration_count"] or 0) - (a["iteration_count"] or 0)
+    # Duration delta in seconds (positive = b was slower).
+    da_s = a.get("duration_seconds")
+    db_s = b.get("duration_seconds")
+    dur_delta = (
+        (db_s or 0) - (da_s or 0) if (da_s is not None and db_s is not None) else None
+    )
+    # Per-index iteration status agreement.
+    n = min(a["iteration_count"], b["iteration_count"])
+    same_status = sum(
+        1 for i in range(n)
+        if a["iterations"][i]["final_e2e_status"]
+        == b["iterations"][i]["final_e2e_status"]
+    )
+    first_diverge: int | None = None
+    for i in range(n):
+        if (a["iterations"][i]["final_e2e_status"]
+                != b["iterations"][i]["final_e2e_status"]
+            or a["iterations"][i]["patch_hash"]
+                != b["iterations"][i]["patch_hash"]):
+            first_diverge = i + 1
+            break
+    # Files only touched on one side vs both.
+    files_a = {f for it in a["iterations"] for f in it["changed_files"]}
+    files_b = {f for it in b["iterations"] for f in it["changed_files"]}
+    return {
+        "both_present": True,
+        "same_goal": (a.get("goal") or "") == (b.get("goal") or ""),
+        "same_scenario": (a.get("scenario") or "") == (b.get("scenario") or ""),
+        "same_final_status": a.get("final_status") == b.get("final_status"),
+        "iteration_count_delta": di,
+        "duration_seconds_delta": dur_delta,
+        "iteration_status_agreement": same_status,
+        "iteration_status_compared": n,
+        "first_diverging_iteration": first_diverge,
+        "files_only_a": sorted(files_a - files_b),
+        "files_only_b": sorted(files_b - files_a),
+        "files_both": sorted(files_a & files_b),
+        "audit_total_delta": (
+            (b["audit"]["total"] or 0) - (a["audit"]["total"] or 0)
+        ),
+    }
+
+
+def _trend_bucket_key(goal: str | None) -> str:
+    """Group runs by a normalized implementation goal.
+
+    Whitespace-folded so trivially re-typed goals still cluster together;
+    blank or missing goals sort into the ``""`` bucket which the caller
+    treats as "ungrouped" and excludes from the trends payload.
+    """
+    if not goal:
+        return ""
+    return " ".join(goal.split()).strip()
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    if n % 2:
+        return float(s[mid])
+    return (s[mid - 1] + s[mid]) / 2.0
+
+
+def _trend_bucket_stats(series: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compute first-half vs second-half medians + pass-rate.
+
+    ``series`` is ordered oldest → newest. With <4 runs we still return
+    pass_rate but skip the split deltas so we don't pretend a 2-run
+    sample tells us anything about a trend direction.
+    """
+    n = len(series)
+    pass_n = sum(1 for s in series if s["status"] == "passed")
+    fail_n = sum(1 for s in series if s["failed"])
+    other_n = n - pass_n - fail_n
+    iters = [s["iterations"] for s in series if s["iterations"] is not None]
+    durs = [s["duration_seconds"] for s in series
+            if s["duration_seconds"] is not None]
+    stats: dict[str, Any] = {
+        "count": n,
+        "pass_count": pass_n,
+        "fail_count": fail_n,
+        "other_count": other_n,
+        "pass_rate": (pass_n / n) if n else 0.0,
+        "median_iterations": _median(iters),
+        "median_duration_seconds": _median(durs),
+    }
+    if n >= 4:
+        cut = n // 2
+        first = series[:cut]
+        second = series[cut:]
+        fp = sum(1 for s in first if s["status"] == "passed") / len(first)
+        sp = sum(1 for s in second if s["status"] == "passed") / len(second)
+        fi = _median([s["iterations"] for s in first
+                      if s["iterations"] is not None])
+        si = _median([s["iterations"] for s in second
+                      if s["iterations"] is not None])
+        fd = _median([s["duration_seconds"] for s in first
+                      if s["duration_seconds"] is not None])
+        sd = _median([s["duration_seconds"] for s in second
+                      if s["duration_seconds"] is not None])
+        stats["pass_rate_first_half"] = fp
+        stats["pass_rate_second_half"] = sp
+        stats["pass_rate_delta"] = sp - fp
+        stats["iterations_first_half"] = fi
+        stats["iterations_second_half"] = si
+        stats["iterations_delta"] = (
+            (si - fi) if (fi is not None and si is not None) else None
+        )
+        stats["duration_first_half"] = fd
+        stats["duration_second_half"] = sd
+        stats["duration_delta"] = (
+            (sd - fd) if (fd is not None and sd is not None) else None
+        )
+    return stats
+
+
+def _summarize_trends(runs_dir: Path) -> dict[str, Any]:
+    """Group every run on disk by implementation goal and emit one
+    bucket per goal with chronological series + stats. Single-run goals
+    are returned too so the UI can show "run more to see trends"
+    without doing a second probe. The ``ungrouped`` bucket collects
+    runs with no goal — also useful to surface vs silently dropping.
+    """
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    ungrouped: list[dict[str, Any]] = []
+    if runs_dir.exists():
+        for d in sorted(runs_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            tm = d / "task_manifest.json"
+            if not tm.exists():
+                continue
+            try:
+                data = read_json(tm)
+            except Exception:
+                continue
+            tc = data.get("task_contract") or {}
+            goal = tc.get("implementation_goal") if isinstance(tc, dict) else None
+            key = _trend_bucket_key(goal if isinstance(goal, str) else None)
+            status = data.get("final_status") or data.get("status")
+            entry = {
+                "task_id": data.get("task_id", d.name),
+                "status": status,
+                "failed": isinstance(status, str) and status.startswith("failed"),
+                "iterations": _count_iterations(d),
+                "duration_seconds": _run_duration_seconds(data),
+                "created_at_utc": data.get("created_at_utc"),
+            }
+            if key:
+                buckets.setdefault(key, []).append(entry)
+            else:
+                ungrouped.append(entry)
+
+    out_buckets: list[dict[str, Any]] = []
+    for key, items in buckets.items():
+        items.sort(key=lambda e: e.get("created_at_utc") or "")
+        first_goal = key
+        # Most recent run wins for last_status / last_run_id so the
+        # tooltip surfaces the latest outcome, not the oldest.
+        last = items[-1]
+        out_buckets.append({
+            "key": key,
+            "goal": first_goal,
+            "series": items,
+            "last_run_id": last["task_id"],
+            "last_status": last["status"],
+            "last_created_at_utc": last["created_at_utc"],
+            "stats": _trend_bucket_stats(items),
+        })
+    # Stable, useful default order: most active bucket first, then by
+    # most recent run inside it. ``count desc, last_created_at_utc desc``.
+    out_buckets.sort(
+        key=lambda b: (-b["stats"]["count"],
+                       -(_iso_sort_key(b["last_created_at_utc"]))),
+    )
+    return {
+        "buckets": out_buckets,
+        "ungrouped_count": len(ungrouped),
+        "total_runs": sum(b["stats"]["count"] for b in out_buckets) + len(ungrouped),
+    }
+
+
+def _iso_sort_key(ts: str | None) -> int:
+    """Cheap sortable integer for ISO-8601 zulu timestamps; missing
+    values land at 0 so they sort oldest."""
+    if not ts:
+        return 0
+    try:
+        t = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return 0
+    return int(t.timestamp())
 
 
 def _summarize_attempts(iter_dir: Path) -> dict[str, Any]:
