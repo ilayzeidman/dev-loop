@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1555,13 +1556,94 @@ def _trend_bucket_stats(series: list[dict[str, Any]]) -> dict[str, Any]:
     return stats
 
 
+_TRENDS_CACHE_LOCK = threading.Lock()
+_TRENDS_CACHE: dict[str, tuple[Any, dict[str, Any]]] = {}
+
+
+def _clear_trends_cache() -> None:
+    """Drop the trends-bucketing memo. Tests call this between server
+    instances that share a ``runs_dir`` path; production never needs to
+    invalidate manually because the signature catches all mutations."""
+    with _TRENDS_CACHE_LOCK:
+        _TRENDS_CACHE.clear()
+
+
+def _trends_signature(runs_dir: Path) -> Any:
+    """Return a value that changes iff the trends payload would change.
+
+    The payload depends on (a) which run dirs exist, (b) each run's
+    ``task_manifest.json`` contents, and (c) the number of ``iter-NNN``
+    subdirectories under each run's ``iterations/``. We approximate (b)
+    and (c) with ``mtime_ns`` on the manifest file and the iterations
+    directory respectively — both are written by the orchestrator and
+    bump whenever their contents do. Stat calls are O(N) in the number
+    of runs but ~100x cheaper than parsing JSON, so this still beats
+    re-summarizing on every poll.
+    """
+    if not runs_dir.exists():
+        return ("missing", None)
+    try:
+        root_stat = runs_dir.stat()
+    except OSError:
+        return ("missing", None)
+    entries: list[tuple[str, int, int, int]] = []
+    try:
+        it = os.scandir(runs_dir)
+    except OSError:
+        return ("missing", None)
+    with it:
+        for de in it:
+            if not de.is_dir(follow_symlinks=False):
+                continue
+            tm_mtime = 0
+            try:
+                tm_mtime = os.stat(
+                    os.path.join(de.path, "task_manifest.json"),
+                ).st_mtime_ns
+            except OSError:
+                pass
+            iters_mtime = 0
+            iters_count = 0
+            try:
+                iters_st = os.stat(os.path.join(de.path, "iterations"))
+                iters_mtime = iters_st.st_mtime_ns
+                with os.scandir(os.path.join(de.path, "iterations")) as ii:
+                    iters_count = sum(
+                        1 for sub in ii if sub.is_dir(follow_symlinks=False)
+                    )
+            except OSError:
+                pass
+            entries.append((de.name, tm_mtime, iters_mtime, iters_count))
+    entries.sort()
+    return (root_stat.st_mtime_ns, tuple(entries))
+
+
 def _summarize_trends(runs_dir: Path) -> dict[str, Any]:
     """Group every run on disk by implementation goal and emit one
     bucket per goal with chronological series + stats. Single-run goals
     are returned too so the UI can show "run more to see trends"
     without doing a second probe. The ``ungrouped`` bucket collects
     runs with no goal — also useful to surface vs silently dropping.
+
+    Memoised on a cheap stat-based signature of ``runs_dir`` so repeated
+    polls from the Analyze tab don't re-walk and re-parse the full
+    ledger; busy repos with hundreds of runs would otherwise pay the
+    full O(N) cost on every refresh.
     """
+    key = str(runs_dir)
+    sig = _trends_signature(runs_dir)
+    with _TRENDS_CACHE_LOCK:
+        hit = _TRENDS_CACHE.get(key)
+        if hit is not None and hit[0] == sig:
+            return copy.deepcopy(hit[1])
+
+    payload = _compute_trends(runs_dir)
+    with _TRENDS_CACHE_LOCK:
+        _TRENDS_CACHE[key] = (sig, payload)
+        return copy.deepcopy(payload)
+
+
+def _compute_trends(runs_dir: Path) -> dict[str, Any]:
     buckets: dict[str, list[dict[str, Any]]] = {}
     ungrouped: list[dict[str, Any]] = []
     if runs_dir.exists():

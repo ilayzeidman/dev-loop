@@ -1570,6 +1570,84 @@ def test_trends_mount_listed_in_index_doc(tmp_path: Path):
         assert 'id="run-trends"' in body
 
 
+def test_trends_cache_skips_recompute_when_signature_unchanged(tmp_path: Path):
+    """A second call with no on-disk changes must hit the memo and not
+    re-walk the ledger. We verify by patching ``_compute_trends`` to
+    count invocations — once on a cold call, still once after a repeat
+    poll of the same ``runs_dir``."""
+    from harness.ui import server as srv
+
+    srv._clear_trends_cache()
+    _write_run(tmp_path, "r1", goal="a",
+               created="2026-05-20T10:00:00Z",
+               updated="2026-05-20T10:00:30Z")
+    _write_run(tmp_path, "r2", goal="a",
+               created="2026-05-20T11:00:00Z",
+               updated="2026-05-20T11:00:30Z")
+    calls = {"n": 0}
+    original = srv._compute_trends
+
+    def _spy(runs_dir: Path) -> dict:
+        calls["n"] += 1
+        return original(runs_dir)
+
+    srv._compute_trends = _spy
+    try:
+        with _server(tmp_path) as (port, _):
+            first = json.loads(_get(port, "/api/runs/trends")[1])
+            second = json.loads(_get(port, "/api/runs/trends")[1])
+    finally:
+        srv._compute_trends = original
+
+    assert calls["n"] == 1
+    assert first == second
+
+
+def test_trends_cache_invalidates_when_new_run_appears(tmp_path: Path):
+    """Dropping a fresh run dir under ``runs_dir`` bumps the cache
+    signature and forces a recompute so the new run shows up
+    immediately — no stale sidebar."""
+    from harness.ui import server as srv
+
+    srv._clear_trends_cache()
+    _write_run(tmp_path, "r1", goal="a",
+               created="2026-05-20T10:00:00Z",
+               updated="2026-05-20T10:00:30Z")
+    with _server(tmp_path) as (port, _):
+        before = json.loads(_get(port, "/api/runs/trends")[1])
+        assert before["total_runs"] == 1
+        _write_run(tmp_path, "r2", goal="a",
+                   created="2026-05-21T10:00:00Z",
+                   updated="2026-05-21T10:00:30Z")
+        after = json.loads(_get(port, "/api/runs/trends")[1])
+        assert after["total_runs"] == 2
+        only = next(b for b in after["buckets"] if b["key"] == "a")
+        assert only["stats"]["count"] == 2
+
+
+def test_trends_cache_invalidates_when_iteration_added(tmp_path: Path):
+    """Adding a new ``iter-NNN`` to an existing run must invalidate the
+    cache so the bucket's iteration count updates without a server
+    restart."""
+    from harness.ui import server as srv
+
+    srv._clear_trends_cache()
+    run_dir = _write_run(
+        tmp_path, "r1", goal="a",
+        created="2026-05-20T10:00:00Z",
+        updated="2026-05-20T10:00:30Z",
+        iterations=[{"i": 1, "final_e2e_status": "passed"}],
+    )
+    with _server(tmp_path) as (port, _):
+        before = json.loads(_get(port, "/api/runs/trends")[1])
+        bucket = next(b for b in before["buckets"] if b["key"] == "a")
+        assert bucket["series"][0]["iterations"] == 1
+        (run_dir / "iterations" / "iter-002").mkdir()
+        after = json.loads(_get(port, "/api/runs/trends")[1])
+        bucket2 = next(b for b in after["buckets"] if b["key"] == "a")
+        assert bucket2["series"][0]["iterations"] == 2
+
+
 # ----- /api/playbooks (per-repo overrides) ---------------------------------
 
 
