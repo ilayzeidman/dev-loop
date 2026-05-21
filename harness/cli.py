@@ -561,7 +561,37 @@ def _cmd_runs_show(
                 print(f"      error: {_truncate(it['error'], 100)}")
             if it.get("summary"):
                 print(f"      {_truncate(it['summary'], 100)}")
+            line = _fmt_ai_call_rollup(it.get("ai_call_rollup") or {})
+            if line:
+                print(f"      ai_calls: {line}")
     return 0
+
+
+def _fmt_ai_call_rollup(rollup: dict[str, Any]) -> str:
+    """Render the per-iteration ai_calls rollup line for ``runs show``.
+
+    Empty string when there were no recorded calls (older runs predate
+    the Iter 9 metadata layout). The line mirrors the pills the Analyze
+    tab's drilldown shows so terminal users get the same at-a-glance
+    signal — provider mix, any non-zero exit codes, fallback count.
+    """
+    total = rollup.get("total") or 0
+    if total <= 0:
+        return ""
+    parts = [f"{total} call{'s' if total != 1 else ''}"]
+    by_prov = rollup.get("by_provider") or {}
+    if by_prov:
+        prov_bits = ", ".join(
+            f"{prov}={count}" for prov, count in sorted(by_prov.items())
+        )
+        parts.append(f"providers: {prov_bits}")
+    nz = rollup.get("nonzero_returncodes") or 0
+    if nz:
+        parts.append(f"nonzero_rc={nz}")
+    synth = rollup.get("synthesized") or 0
+    if synth:
+        parts.append(f"synthesized={synth}")
+    return "  ".join(parts)
 
 
 def _cmd_runs_diff(

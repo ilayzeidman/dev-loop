@@ -458,6 +458,94 @@ def test_runs_diff_last_alias_with_no_runs_errors(tmp_path: Path, capsys):
     assert "cannot resolve" in err
 
 
+def _seed_ai_call_for_iter(
+    runs_dir: Path, task_id: str, iteration: int, ordinal: int, phase: str,
+    *, provider: str, returncode: int | None = 0, synthesized: bool = False,
+) -> None:
+    d = (runs_dir / task_id / "iterations" / f"iter-{iteration:03d}"
+         / "ai_calls" / f"{ordinal:03d}_{phase}")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "input.json").write_text("{}")
+    (d / "output.json").write_text(json.dumps({"type": phase}))
+    meta: dict = {"provider": provider}
+    if returncode is not None:
+        meta["returncode"] = returncode
+    if synthesized:
+        meta["synthesized"] = True
+    (d / "metadata.json").write_text(json.dumps(meta))
+
+
+def test_runs_show_renders_ai_calls_rollup(tmp_path: Path, capsys):
+    """``runs show`` surfaces the same provider/returncode pills the
+    Analyze tab shows so terminal users get CLI symmetry with the UI."""
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    runs_dir = tmp_path / ".dev-loop" / "runs"
+    _fake_run(runs_dir, "20260520-120000-x", iterations=1, selected=1)
+    _seed_ai_call_for_iter(
+        runs_dir, "20260520-120000-x", 1, 1, "implementation",
+        provider="claude", returncode=0,
+    )
+    _seed_ai_call_for_iter(
+        runs_dir, "20260520-120000-x", 1, 11, "triage_attempt_1",
+        provider="codex", returncode=2,
+    )
+    rc = cli.main([
+        "--repo", str(tmp_path), "runs", "show", "20260520-120000-x",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ai_calls:" in out
+    assert "2 calls" in out
+    assert "claude=1" in out and "codex=1" in out
+    assert "nonzero_rc=1" in out
+
+
+def test_runs_show_omits_ai_calls_line_for_legacy_runs(tmp_path: Path, capsys):
+    """Runs from before ai_calls metadata was recorded must still render
+    cleanly — no empty ``ai_calls:`` line dangling under each iteration."""
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    runs_dir = tmp_path / ".dev-loop" / "runs"
+    _fake_run(runs_dir, "20260520-120000-legacy", iterations=1, selected=1)
+    rc = cli.main([
+        "--repo", str(tmp_path), "runs", "show", "20260520-120000-legacy",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ai_calls:" not in out
+
+
+def test_runs_show_json_embeds_ai_calls(tmp_path: Path, capsys):
+    """``--json`` includes the per-iteration ai_calls list + rollup so
+    scripts can consume the same data the Analyze tab does."""
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    runs_dir = tmp_path / ".dev-loop" / "runs"
+    _fake_run(runs_dir, "20260520-120000-y", iterations=1, selected=1)
+    _seed_ai_call_for_iter(
+        runs_dir, "20260520-120000-y", 1, 1, "implementation",
+        provider="claude", returncode=0,
+    )
+    _seed_ai_call_for_iter(
+        runs_dir, "20260520-120000-y", 1, 12, "triage_attempt_1_harness_fallback",
+        provider="harness", returncode=None, synthesized=True,
+    )
+    rc = cli.main([
+        "--repo", str(tmp_path), "runs", "show", "20260520-120000-y", "--json",
+    ])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    it = payload["iterations"][0]
+    assert [c["name"] for c in it["ai_calls"]] == [
+        "001_implementation", "012_triage_attempt_1_harness_fallback",
+    ]
+    rollup = it["ai_call_rollup"]
+    assert rollup["total"] == 2
+    assert rollup["by_provider"] == {"claude": 1, "harness": 1}
+    assert rollup["synthesized"] == 1
+
+
 def test_schema_validate_ok(tmp_path: Path):
     obj = {
         "type": "task_contract",

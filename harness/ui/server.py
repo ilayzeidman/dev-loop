@@ -92,6 +92,7 @@ from ..doctor import run_doctor as _run_doctor
 from ..playbooks import PLAYBOOK_DIR, repo_playbook_dir
 from ..runs import audit_rollup as _runs_audit_rollup
 from ..runs import diff_deltas as _runs_diff_deltas
+from ..runs import iteration_ai_calls as _runs_iteration_ai_calls
 from ..runs import show_run as _runs_show_run
 from ..schemas import SCHEMA_DIR
 from ..scenarios import (
@@ -1644,46 +1645,11 @@ _AI_CALL_DIR_RE = re.compile(r"^\d{3}_[A-Za-z0-9_\-]+$")
 def _summarize_ai_calls(iter_dir: Path) -> dict[str, Any]:
     """Compact list of every AI call recorded for one iteration.
 
-    Lets the Analyze tab show provider invocations as first-class
-    citizens (phase, provider, exit code, stderr tail length) without
-    forcing the user to drill into each call's full input/output. The
-    full detail is one click away via ``_ai_call_dump``.
+    Delegates to ``harness.runs.iteration_ai_calls`` so the Analyze tab
+    and the CLI ``runs show`` rollup line agree on the per-call shape
+    (Iter 10: one source of truth, mirroring the diff/compare refactor).
     """
-    out: list[dict[str, Any]] = []
-    d = iter_dir / "ai_calls"
-    if not d.exists():
-        return {"calls": out}
-    for sub in sorted(d.iterdir()):
-        if not sub.is_dir():
-            continue
-        name = sub.name
-        # Parse "NNN_phase" — ordinal first, then phase tag.
-        ordinal: int | None = None
-        phase = name
-        head, _, tail = name.partition("_")
-        if head.isdigit() and tail:
-            ordinal = int(head)
-            phase = tail
-        meta = _read_safe_json(sub / "metadata.json") if (sub / "metadata.json").exists() else {}
-        if not isinstance(meta, dict):
-            meta = {}
-        output = _read_safe_json(sub / "output.json") if (sub / "output.json").exists() else {}
-        if not isinstance(output, dict):
-            output = {}
-        out.append({
-            "name": name,
-            "ordinal": ordinal,
-            "phase": phase,
-            "provider": meta.get("provider"),
-            "returncode": meta.get("returncode"),
-            "synthesized": bool(meta.get("synthesized")),
-            "ts_utc": meta.get("ts_utc"),
-            "has_raw_log": (sub / "raw_provider_log.jsonl").exists(),
-            "has_metadata": bool(meta),
-            "stderr_tail_len": len(meta.get("stderr_tail") or ""),
-            "output_type": output.get("type"),
-        })
-    return {"calls": out}
+    return {"calls": _runs_iteration_ai_calls(iter_dir)}
 
 
 def _ai_call_dump(ai_calls_dir: Path, name: str) -> dict[str, Any]:

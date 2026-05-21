@@ -14,11 +14,15 @@ showing the others.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .util import read_json
+
+
+_AI_CALL_DIR_RE = re.compile(r"^\d{3}_[A-Za-z0-9_\-]+$")
 
 
 def _parse_iso(s: str | None) -> datetime | None:
@@ -87,6 +91,92 @@ def list_runs(runs_dir: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _safe_read_json(path: Path) -> Any:
+    if not path.exists():
+        return None
+    try:
+        return read_json(path)
+    except Exception:
+        return None
+
+
+def iteration_ai_calls(iter_dir: Path) -> list[dict[str, Any]]:
+    """Compact per-call summary for one iteration's ``ai_calls/`` directory.
+
+    Returns ``[]`` when the iteration predates the Iter 9 metadata layout
+    (no ``ai_calls`` dir) or contains no recorded calls. Each entry is
+    the same row the Analyze tab's drilldown consumes — ordinal, phase,
+    provider, returncode, synthesized flag, etc. — so CLI and UI agree
+    on what a "call" looks like.
+    """
+    out: list[dict[str, Any]] = []
+    d = iter_dir / "ai_calls"
+    if not d.exists() or not d.is_dir():
+        return out
+    for sub in sorted(d.iterdir()):
+        if not sub.is_dir() or not _AI_CALL_DIR_RE.match(sub.name):
+            continue
+        name = sub.name
+        ordinal: int | None = None
+        phase = name
+        head, _, tail = name.partition("_")
+        if head.isdigit() and tail:
+            ordinal = int(head)
+            phase = tail
+        meta = _safe_read_json(sub / "metadata.json")
+        if not isinstance(meta, dict):
+            meta = {}
+        output = _safe_read_json(sub / "output.json")
+        if not isinstance(output, dict):
+            output = {}
+        out.append({
+            "name": name,
+            "ordinal": ordinal,
+            "phase": phase,
+            "provider": meta.get("provider"),
+            "returncode": meta.get("returncode"),
+            "synthesized": bool(meta.get("synthesized")),
+            "ts_utc": meta.get("ts_utc"),
+            "has_raw_log": (sub / "raw_provider_log.jsonl").exists(),
+            "has_metadata": bool(meta),
+            "stderr_tail_len": len(meta.get("stderr_tail") or ""),
+            "output_type": output.get("type"),
+        })
+    return out
+
+
+def ai_call_rollup(calls: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate one iteration's ai-call list into compact totals.
+
+    Returns ``{"total", "by_provider", "nonzero_returncodes",
+    "synthesized", "phases"}``. Used by the CLI ``runs show`` rollup
+    line and embedded in ``show_run`` payloads so scripts get the same
+    shape without re-walking the directory.
+    """
+    by_provider: dict[str, int] = {}
+    phases: list[str] = []
+    nonzero = 0
+    synthesized = 0
+    for c in calls:
+        prov = c.get("provider") or "?"
+        by_provider[prov] = by_provider.get(prov, 0) + 1
+        ph = c.get("phase")
+        if isinstance(ph, str) and ph:
+            phases.append(ph)
+        rc = c.get("returncode")
+        if isinstance(rc, int) and rc != 0:
+            nonzero += 1
+        if c.get("synthesized"):
+            synthesized += 1
+    return {
+        "total": len(calls),
+        "by_provider": by_provider,
+        "nonzero_returncodes": nonzero,
+        "synthesized": synthesized,
+        "phases": phases,
+    }
+
+
 def show_run(runs_dir: Path, task_id: str) -> dict[str, Any] | None:
     """Return a detailed summary for one run, or ``None`` if it doesn't exist.
 
@@ -131,6 +221,7 @@ def show_run(runs_dir: Path, task_id: str) -> dict[str, Any] | None:
                 sum(1 for x in v.iterdir() if x.is_dir())
                 if v.exists() else 0
             )
+            calls = iteration_ai_calls(d)
             iterations.append({
                 "iteration": n,
                 "final_e2e_status": im.get("final_e2e_status"),
@@ -139,6 +230,8 @@ def show_run(runs_dir: Path, task_id: str) -> dict[str, Any] | None:
                 "changed_files": list(code.get("changed_files") or []),
                 "attempts": attempt_count,
                 "error": im.get("error"),
+                "ai_calls": calls,
+                "ai_call_rollup": ai_call_rollup(calls),
             })
 
     report_md = run_root / "final_review_report.md"

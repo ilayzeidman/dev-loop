@@ -351,3 +351,152 @@ def test_diff_runs_missing_side(tmp_path: Path):
     assert result["a"]["task_id"] == "20260101-000000-a"
     assert result["b"] is None
     assert result["deltas"] == {"both_present": False}
+
+
+def _write_ai_call(
+    iter_dir: Path, ordinal: int, phase: str,
+    *,
+    provider: str | None = "claude",
+    returncode: int | None = 0,
+    synthesized: bool = False,
+    output_type: str = "implementation_result",
+    raw_log: str | None = None,
+) -> Path:
+    """Hand-build one ``ai_calls/NNN_phase/`` directory the readers consume."""
+    d = iter_dir / "ai_calls" / f"{ordinal:03d}_{phase}"
+    d.mkdir(parents=True)
+    (d / "input.json").write_text(json.dumps({"i": ordinal}))
+    (d / "output.json").write_text(json.dumps({"type": output_type}))
+    meta: dict[str, Any] = {}
+    if provider is not None:
+        meta["provider"] = provider
+    if returncode is not None:
+        meta["returncode"] = returncode
+    if synthesized:
+        meta["synthesized"] = True
+    if meta:
+        (d / "metadata.json").write_text(json.dumps(meta))
+    if raw_log is not None:
+        (d / "raw_provider_log.jsonl").write_text(raw_log)
+    return d
+
+
+def test_iteration_ai_calls_returns_empty_when_dir_missing(tmp_path: Path):
+    assert runs.iteration_ai_calls(tmp_path / "nope") == []
+
+
+def test_iteration_ai_calls_parses_metadata_and_outputs(tmp_path: Path):
+    iter_dir = tmp_path / "iter-001"
+    iter_dir.mkdir()
+    _write_ai_call(
+        iter_dir, 1, "implementation",
+        provider="claude", returncode=0,
+        output_type="implementation_result",
+        raw_log="line\n",
+    )
+    _write_ai_call(
+        iter_dir, 11, "triage_attempt_1",
+        provider="codex", returncode=2,
+        output_type="failure_triage",
+    )
+    _write_ai_call(
+        iter_dir, 12, "triage_attempt_1_harness_fallback",
+        provider="harness", returncode=None, synthesized=True,
+        output_type="failure_triage",
+    )
+
+    calls = runs.iteration_ai_calls(iter_dir)
+    assert [c["name"] for c in calls] == [
+        "001_implementation",
+        "011_triage_attempt_1",
+        "012_triage_attempt_1_harness_fallback",
+    ]
+    impl = calls[0]
+    assert impl["ordinal"] == 1
+    assert impl["phase"] == "implementation"
+    assert impl["provider"] == "claude"
+    assert impl["returncode"] == 0
+    assert impl["has_raw_log"] is True
+    assert impl["has_metadata"] is True
+    assert impl["synthesized"] is False
+    assert impl["output_type"] == "implementation_result"
+    assert calls[1]["returncode"] == 2
+    assert calls[2]["synthesized"] is True
+    assert calls[2]["has_raw_log"] is False
+
+
+def test_iteration_ai_calls_skips_unrelated_entries(tmp_path: Path):
+    """Files and oddly-named directories under ai_calls/ are ignored so
+    a stray ``.DS_Store`` or rename in progress can't corrupt the list."""
+    iter_dir = tmp_path / "iter-001"
+    (iter_dir / "ai_calls").mkdir(parents=True)
+    (iter_dir / "ai_calls" / "stray.txt").write_text("noise")
+    (iter_dir / "ai_calls" / "not-a-call-dir").mkdir()
+    _write_ai_call(iter_dir, 1, "implementation")
+    calls = runs.iteration_ai_calls(iter_dir)
+    assert [c["name"] for c in calls] == ["001_implementation"]
+
+
+def test_ai_call_rollup_aggregates_providers_and_signals():
+    calls = [
+        {"provider": "claude", "phase": "implementation",
+         "returncode": 0, "synthesized": False},
+        {"provider": "codex", "phase": "triage_attempt_1",
+         "returncode": 2, "synthesized": False},
+        {"provider": "codex", "phase": "triage_attempt_1",
+         "returncode": 0, "synthesized": False},
+        {"provider": "harness", "phase": "triage_attempt_1_harness_fallback",
+         "returncode": None, "synthesized": True},
+    ]
+    rollup = runs.ai_call_rollup(calls)
+    assert rollup["total"] == 4
+    assert rollup["by_provider"] == {"claude": 1, "codex": 2, "harness": 1}
+    assert rollup["nonzero_returncodes"] == 1
+    assert rollup["synthesized"] == 1
+    assert "implementation" in rollup["phases"]
+
+
+def test_ai_call_rollup_empty_when_no_calls():
+    rollup = runs.ai_call_rollup([])
+    assert rollup == {
+        "total": 0, "by_provider": {}, "nonzero_returncodes": 0,
+        "synthesized": 0, "phases": [],
+    }
+
+
+def test_show_run_embeds_ai_call_rollup_per_iteration(tmp_path: Path):
+    """``show_run`` includes the same per-iteration ai_calls list and
+    rollup that the UI's Analyze tab consumes — so scripts can drive
+    decisions on provider mix / fallback rate without re-walking the
+    ledger directory."""
+    root = _write_run(tmp_path, "20260520-120000-x", iterations=1)
+    iter_dir = root / "iterations" / "iter-001"
+    _write_ai_call(
+        iter_dir, 1, "implementation",
+        provider="claude", returncode=0,
+    )
+    _write_ai_call(
+        iter_dir, 11, "triage_attempt_1",
+        provider="codex", returncode=2,
+    )
+    detail = runs.show_run(tmp_path, "20260520-120000-x")
+    assert detail is not None
+    it = detail["iterations"][0]
+    assert "ai_calls" in it and "ai_call_rollup" in it
+    assert [c["name"] for c in it["ai_calls"]] == [
+        "001_implementation", "011_triage_attempt_1",
+    ]
+    assert it["ai_call_rollup"]["total"] == 2
+    assert it["ai_call_rollup"]["by_provider"] == {"claude": 1, "codex": 1}
+    assert it["ai_call_rollup"]["nonzero_returncodes"] == 1
+
+
+def test_show_run_ai_call_rollup_empty_for_legacy_runs(tmp_path: Path):
+    """Runs from before ``ai_calls/`` was recorded still load — the
+    rollup is just zeroed rather than blowing up downstream consumers."""
+    _write_run(tmp_path, "20260101-000000-legacy", iterations=1)
+    detail = runs.show_run(tmp_path, "20260101-000000-legacy")
+    assert detail is not None
+    it = detail["iterations"][0]
+    assert it["ai_calls"] == []
+    assert it["ai_call_rollup"]["total"] == 0
