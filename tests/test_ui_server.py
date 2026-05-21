@@ -1623,3 +1623,112 @@ def test_readonly_banners_present_in_index_doc(tmp_path: Path):
     # they can be edited — but the edits go to the repo.
     assert "Saves stay in this repo" in body
     assert "id=\"pb-override-path\"" in body
+
+
+def _seed_ai_call(
+    repo: Path, task_id: str, iteration: int, ordinal: int, phase: str,
+    *, metadata: dict | None = None, raw_log: str | None = None,
+    output: dict | None = None,
+) -> Path:
+    """Hand-build an ai_call dir so tests don't need a real loop run."""
+    base = (repo / ".dev-loop" / "runs" / task_id
+            / "iterations" / f"iter-{iteration:03d}" / "ai_calls"
+            / f"{ordinal:03d}_{phase}")
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "input.json").write_text(json.dumps({"i": ordinal}), encoding="utf-8")
+    (base / "output.json").write_text(
+        json.dumps(output or {"type": phase, "ok": True}), encoding="utf-8")
+    if metadata is not None:
+        (base / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    if raw_log is not None:
+        (base / "raw_provider_log.jsonl").write_text(raw_log, encoding="utf-8")
+    return base
+
+
+def test_ai_calls_endpoint_surfaces_provider_metadata(tmp_path: Path):
+    """``/api/runs/<task>/iteration/<n>/ai_calls`` returns one row per
+    recorded AI call, with provider/returncode/synthesized flags lifted
+    out of ``metadata.json`` so the Analyze tab can render diagnostic
+    pills without grepping ``raw_provider_log``."""
+    task_id = "20260521-abc-demo"
+    run_dir = tmp_path / ".dev-loop" / "runs" / task_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "task_manifest.json").write_text(
+        json.dumps({"task_id": task_id}), encoding="utf-8")
+    _seed_ai_call(
+        tmp_path, task_id, 1, 1, "implementation",
+        metadata={
+            "provider": "claude", "returncode": 0,
+            "stderr_tail": "", "argv": ["claude", "--headless"],
+            "ts_utc": "2026-05-21T00:00:00Z",
+        },
+        raw_log="line1\nline2\n",
+        output={"type": "implementation_result"},
+    )
+    _seed_ai_call(
+        tmp_path, task_id, 1, 11, "triage_attempt_1",
+        metadata={
+            "provider": "codex", "returncode": 2,
+            "stderr_tail": "boom\n", "argv": ["codex"],
+        },
+        output={"type": "failure_triage"},
+    )
+    _seed_ai_call(
+        tmp_path, task_id, 1, 11, "triage_attempt_1_harness_fallback",
+        metadata={"provider": "harness", "synthesized": True},
+        output={"type": "failure_triage"},
+    )
+    with _server(tmp_path) as (port, _):
+        status, body = _get(
+            port, f"/api/runs/{task_id}/iteration/1/ai_calls")
+        assert status == 200, body
+        data = json.loads(body)
+    calls = {c["name"]: c for c in data["calls"]}
+    impl = calls["001_implementation"]
+    assert impl["provider"] == "claude"
+    assert impl["returncode"] == 0
+    assert impl["phase"] == "implementation"
+    assert impl["ordinal"] == 1
+    assert impl["has_raw_log"] is True
+    assert impl["has_metadata"] is True
+    assert impl["synthesized"] is False
+    assert impl["output_type"] == "implementation_result"
+    triage = calls["011_triage_attempt_1"]
+    assert triage["provider"] == "codex"
+    assert triage["returncode"] == 2
+    assert triage["stderr_tail_len"] == len("boom\n")
+    fallback = calls["011_triage_attempt_1_harness_fallback"]
+    assert fallback["synthesized"] is True
+    assert fallback["provider"] == "harness"
+
+
+def test_ai_call_dump_returns_full_payload_and_rejects_traversal(tmp_path: Path):
+    """``/api/runs/<task>/iteration/<n>/ai_call/<id>`` returns input,
+    output, metadata and raw log. The ``<id>`` must match the canonical
+    ``NNN_phase`` shape; anything else (``..``, slashes, etc.) is
+    rejected without touching the filesystem."""
+    task_id = "20260521-def-demo"
+    run_dir = tmp_path / ".dev-loop" / "runs" / task_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "task_manifest.json").write_text(
+        json.dumps({"task_id": task_id}), encoding="utf-8")
+    _seed_ai_call(
+        tmp_path, task_id, 1, 1, "implementation",
+        metadata={"provider": "claude", "returncode": 0,
+                  "argv": ["claude"], "stderr_tail": "warn"},
+        raw_log="raw log body\n",
+    )
+    with _server(tmp_path) as (port, _):
+        status, body = _get(
+            port, f"/api/runs/{task_id}/iteration/1/ai_call/001_implementation")
+        assert status == 200, body
+        dump = json.loads(body)
+        assert dump["name"] == "001_implementation"
+        assert dump["metadata"]["provider"] == "claude"
+        assert dump["raw_provider_log"] == "raw log body\n"
+        assert dump["input"] == {"i": 1}
+        # Bogus id: must be refused at the validation layer (no file IO).
+        status, body = _get(
+            port, f"/api/runs/{task_id}/iteration/1/ai_call/..%2Fetc")
+        assert status == 200
+        assert json.loads(body)["_error"] == "invalid ai_call id"

@@ -265,6 +265,12 @@ def test_replay_run_records_actual_agent_triage_even_when_invalid(tmp_path: Path
     # The fallback's input must explain why the fallback was used.
     fallback_input = read_json(ai_calls_dir / fallback_dirs[0] / "input.json")
     assert "validation_error" in fallback_input
+    # The fallback is clearly labeled as harness-synthesized in metadata
+    # so the Analyze tab can render a "harness fallback" pill without
+    # parsing the dirname.
+    fallback_meta = read_json(ai_calls_dir / fallback_dirs[0] / "metadata.json")
+    assert fallback_meta["provider"] == "harness"
+    assert fallback_meta["synthesized"] is True
 
 
 def test_extra_diagnostics_are_redacted_before_reaching_agent(tmp_path: Path):

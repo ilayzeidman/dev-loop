@@ -286,6 +286,7 @@ class Orchestrator:
             input_obj=redact(impl_input),
             output_obj=impl_res.output if isinstance(impl_res.output, dict) else {"_raw": str(impl_res.output)},
             raw_provider_log=impl_res.raw_log,
+            metadata=impl_res.metadata,
         )
 
         try:
@@ -677,6 +678,7 @@ class Orchestrator:
                 input_obj=redact(triage_input),
                 output_obj=raw_output,
                 raw_provider_log=triage_res.raw_log,
+                metadata=triage_res.metadata,
             )
             return raw_output
         except Exception as e:
@@ -688,6 +690,7 @@ class Orchestrator:
                 output_obj=raw_output if isinstance(raw_output, dict)
                            else {"_raw": str(raw_output)},
                 raw_provider_log=triage_res.raw_log,
+                metadata=triage_res.metadata,
             )
             # 2. Record the harness-synthesized fallback separately so it's
             #    obvious in the audit trail that this decision came from the
@@ -699,6 +702,7 @@ class Orchestrator:
                            "validation_error": str(e)},
                 output_obj=synth,
                 raw_provider_log=None,
+                metadata={"provider": "harness", "synthesized": True},
             )
             return synth
 

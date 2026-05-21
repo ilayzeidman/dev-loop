@@ -1826,7 +1826,11 @@ async function loadIterations(taskId, tm, runMeta) {
   for (let i = 1; i <= total; i++) {
     const im = await getJSON(`/api/runs/${encodeURIComponent(taskId)}/iteration/${i}`);
     const att = await getJSON(`/api/runs/${encodeURIComponent(taskId)}/iteration/${i}/attempts`);
-    iterDocs.push({i, im, att});
+    let ai = {calls: []};
+    try {
+      ai = await getJSON(`/api/runs/${encodeURIComponent(taskId)}/iteration/${i}/ai_calls`);
+    } catch (_) { /* older runs may not have ai_calls; tolerate gracefully */ }
+    iterDocs.push({i, im, att, ai});
   }
 
   const timeline = document.createElement("div");
@@ -1848,7 +1852,7 @@ async function loadIterations(taskId, tm, runMeta) {
       if (tgt) tgt.scrollIntoView({behavior: "smooth", block: "start"});
     }));
 
-  for (const {i, im, att} of iterDocs) {
+  for (const {i, im, att, ai} of iterDocs) {
     const block = document.createElement("div");
     block.className = "iter";
     block.setAttribute("data-iter-block", String(i));
@@ -1859,6 +1863,7 @@ async function loadIterations(taskId, tm, runMeta) {
     const hypothesis = (im.agent_output || {}).hypothesis || "";
     const changed = (im.code || {}).changed_files || [];
     const hash = (im.code || {}).patch_hash || "";
+    const aiCalls = (ai && ai.calls) || [];
     block.innerHTML = `
       <h3>
         Iteration ${i}
@@ -1892,6 +1897,34 @@ async function loadIterations(taskId, tm, runMeta) {
             <div class="attempt-body" data-attempt-detail="${i}-${idx + 1}"></div>
           </div>`).join("")}
       </div>
+      ${aiCalls.length ? `
+      <details class="ai-calls">
+        <summary>
+          AI calls
+          <span class="muted">(${aiCalls.length})</span>
+          ${aiCalls.some(c => c.returncode != null && c.returncode !== 0)
+            ? '<span class="pill fail">non-zero exit</span>' : ""}
+          ${aiCalls.some(c => c.synthesized)
+            ? '<span class="pill warn">harness fallback</span>' : ""}
+        </summary>
+        <div class="ai-call-list">
+          ${aiCalls.map(c => `
+            <div class="ai-call ${c.returncode != null && c.returncode !== 0 ? "fail" : ""} ${c.synthesized ? "synth" : ""}">
+              <div class="ai-call-head">
+                <code>${escapeHtml(c.name)}</code>
+                <span class="pill ${c.synthesized ? "warn" : "info"}">${escapeHtml(c.provider || (c.synthesized ? "harness" : "unknown"))}</span>
+                ${c.returncode != null
+                  ? `<span class="pill ${c.returncode === 0 ? "pass" : "fail"}">rc ${c.returncode}</span>`
+                  : ""}
+                ${c.output_type ? `<span class="muted">→ <code>${escapeHtml(c.output_type)}</code></span>` : ""}
+                ${c.ts_utc ? `<span class="muted" title="${escapeAttr(c.ts_utc)}">${escapeHtml((c.ts_utc || "").replace("T", " ").replace("Z", ""))}</span>` : ""}
+                <button class="secondary" data-action="ai_call"
+                  data-iter="${i}" data-name="${escapeAttr(c.name)}">drill in</button>
+              </div>
+              <div class="ai-call-body" data-ai-call-detail="${i}-${escapeAttr(c.name)}"></div>
+            </div>`).join("")}
+        </div>
+      </details>` : ""}
     `;
     root.appendChild(block);
   }
@@ -1929,8 +1962,73 @@ async function loadIterations(taskId, tm, runMeta) {
         : '<p class="muted">no artifacts for this attempt</p>';
       tgt.dataset.loaded = "1";
       b.textContent = "hide";
+    } else if (b.dataset.action === "ai_call") {
+      const name = b.dataset.name;
+      const tgt = document.querySelector(
+        `[data-ai-call-detail="${i}-${CSS.escape(name)}"]`);
+      if (!tgt) return;
+      if (tgt.dataset.loaded) {
+        tgt.innerHTML = ""; tgt.dataset.loaded = "";
+        b.textContent = "drill in";
+        return;
+      }
+      const dump = await getJSON(
+        `/api/runs/${encodeURIComponent(taskId)}/iteration/${i}` +
+        `/ai_call/${encodeURIComponent(name)}`);
+      tgt.innerHTML = renderAiCallDetail(dump);
+      tgt.dataset.loaded = "1";
+      b.textContent = "hide";
     }
   }));
+}
+
+function renderAiCallDetail(dump) {
+  if (!dump || dump._error) {
+    return `<p class="muted">${escapeHtml((dump && dump._error) || "no detail")}</p>`;
+  }
+  const meta = dump.metadata || {};
+  const parts = [];
+  if (Object.keys(meta).length) {
+    const rows = [];
+    if (meta.provider) rows.push(["provider", meta.provider]);
+    if (meta.returncode != null) rows.push(["returncode", String(meta.returncode)]);
+    if (meta.ts_utc) rows.push(["ts_utc", meta.ts_utc]);
+    if (meta.synthesized) rows.push(["synthesized", "yes"]);
+    if (Array.isArray(meta.argv) && meta.argv.length) {
+      rows.push(["argv", meta.argv.join(" ")]);
+    }
+    parts.push(`<table class="ai-call-meta">
+      ${rows.map(([k, v]) =>
+        `<tr><th>${escapeHtml(k)}</th><td><code>${escapeHtml(v)}</code></td></tr>`).join("")}
+    </table>`);
+    if (meta.stderr_tail) {
+      parts.push(`<details class="file-section" open>
+        <summary><strong>stderr (tail)</strong></summary>
+        <pre>${escapeHtml(meta.stderr_tail)}</pre>
+      </details>`);
+    }
+  } else {
+    parts.push('<p class="muted">no provider metadata recorded</p>');
+  }
+  if (dump.output) {
+    parts.push(`<details class="file-section">
+      <summary><strong>output.json</strong></summary>
+      <pre>${escapeHtml(JSON.stringify(dump.output, null, 2))}</pre>
+    </details>`);
+  }
+  if (dump.input) {
+    parts.push(`<details class="file-section">
+      <summary><strong>input.json</strong></summary>
+      <pre>${escapeHtml(JSON.stringify(dump.input, null, 2))}</pre>
+    </details>`);
+  }
+  if (dump.raw_provider_log) {
+    parts.push(`<details class="file-section">
+      <summary><strong>raw_provider_log.jsonl</strong></summary>
+      <pre>${escapeHtml(dump.raw_provider_log)}</pre>
+    </details>`);
+  }
+  return parts.join("");
 }
 
 // ----- Compare two runs -------------------------------------------------

@@ -17,6 +17,8 @@ Read endpoints
   GET  /api/runs/<task-id>/iteration/<n>/patch  patch diff text
   GET  /api/runs/<task-id>/iteration/<n>/attempts iteration attempts overview
   GET  /api/runs/<task-id>/iteration/<n>/attempt/<a>  full attempt artifact tree
+  GET  /api/runs/<task-id>/iteration/<n>/ai_calls  AI calls recorded for one iter
+  GET  /api/runs/<task-id>/iteration/<n>/ai_call/<id>  one AI call's full payload
   GET  /api/runs/<a>/compare/<b>         side-by-side summary of two runs
   GET  /api/scenarios                    list of scenarios
   GET  /api/scenarios/<name>             scenario file list + previews
@@ -53,6 +55,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -766,6 +769,13 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 if parts[3] == "attempt" and len(parts) >= 5:
                     a = int(parts[4])
                     self._send_json(200, _attempt_dump(iter_dir / "validations" / f"attempt-{a:03d}"))
+                    return
+                if parts[3] == "ai_calls" and len(parts) == 4:
+                    self._send_json(200, _summarize_ai_calls(iter_dir)); return
+                if parts[3] == "ai_call" and len(parts) >= 5:
+                    self._send_json(200, _ai_call_dump(
+                        iter_dir / "ai_calls", unquote(parts[4]),
+                    ))
                     return
             self._send_text(404, "not found")
 
@@ -1626,6 +1636,81 @@ def _attempt_dump(attempt_dir: Path) -> dict[str, Any]:
             except Exception:
                 files[rel] = "<binary>"
     return {"path": str(attempt_dir), "files": files}
+
+
+_AI_CALL_DIR_RE = re.compile(r"^\d{3}_[A-Za-z0-9_\-]+$")
+
+
+def _summarize_ai_calls(iter_dir: Path) -> dict[str, Any]:
+    """Compact list of every AI call recorded for one iteration.
+
+    Lets the Analyze tab show provider invocations as first-class
+    citizens (phase, provider, exit code, stderr tail length) without
+    forcing the user to drill into each call's full input/output. The
+    full detail is one click away via ``_ai_call_dump``.
+    """
+    out: list[dict[str, Any]] = []
+    d = iter_dir / "ai_calls"
+    if not d.exists():
+        return {"calls": out}
+    for sub in sorted(d.iterdir()):
+        if not sub.is_dir():
+            continue
+        name = sub.name
+        # Parse "NNN_phase" — ordinal first, then phase tag.
+        ordinal: int | None = None
+        phase = name
+        head, _, tail = name.partition("_")
+        if head.isdigit() and tail:
+            ordinal = int(head)
+            phase = tail
+        meta = _read_safe_json(sub / "metadata.json") if (sub / "metadata.json").exists() else {}
+        if not isinstance(meta, dict):
+            meta = {}
+        output = _read_safe_json(sub / "output.json") if (sub / "output.json").exists() else {}
+        if not isinstance(output, dict):
+            output = {}
+        out.append({
+            "name": name,
+            "ordinal": ordinal,
+            "phase": phase,
+            "provider": meta.get("provider"),
+            "returncode": meta.get("returncode"),
+            "synthesized": bool(meta.get("synthesized")),
+            "ts_utc": meta.get("ts_utc"),
+            "has_raw_log": (sub / "raw_provider_log.jsonl").exists(),
+            "has_metadata": bool(meta),
+            "stderr_tail_len": len(meta.get("stderr_tail") or ""),
+            "output_type": output.get("type"),
+        })
+    return {"calls": out}
+
+
+def _ai_call_dump(ai_calls_dir: Path, name: str) -> dict[str, Any]:
+    """Full payload for one AI call: input, output, metadata, raw log.
+
+    Validated against ``_AI_CALL_DIR_RE`` so a clever ``name`` cannot
+    traverse out of the iteration's ``ai_calls/`` directory.
+    """
+    if not _AI_CALL_DIR_RE.match(name):
+        return {"_error": "invalid ai_call id"}
+    sub = ai_calls_dir / name
+    if not sub.exists() or not sub.is_dir():
+        return {"_error": "ai_call not found"}
+    raw_log_path = sub / "raw_provider_log.jsonl"
+    raw_log: str | None = None
+    if raw_log_path.exists():
+        try:
+            raw_log = raw_log_path.read_text(encoding="utf-8")
+        except Exception:
+            raw_log = "<binary>"
+    return {
+        "name": name,
+        "input": _read_safe_json(sub / "input.json") if (sub / "input.json").exists() else None,
+        "output": _read_safe_json(sub / "output.json") if (sub / "output.json").exists() else None,
+        "metadata": _read_safe_json(sub / "metadata.json") if (sub / "metadata.json").exists() else None,
+        "raw_provider_log": raw_log,
+    }
 
 
 def _run_job(

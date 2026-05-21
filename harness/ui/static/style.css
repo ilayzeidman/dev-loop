@@ -536,6 +536,57 @@ button:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
 .attempt .attempt-body { margin-top: 0.4em; }
 .attempt .file-section summary { cursor: pointer; padding: 0.2em 0; color: var(--muted); }
 .attempt .file-section summary code { color: var(--fg); }
+
+/* AI calls drilldown (Analyze tab) ----------------------------------- */
+.ai-calls {
+  margin-top: 0.5em;
+  border-top: 1px dashed var(--border);
+  padding-top: 0.4em;
+}
+.ai-calls > summary {
+  cursor: pointer;
+  color: var(--muted);
+  display: flex;
+  gap: 0.5em;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 0.15em 0;
+}
+.ai-calls[open] > summary { color: var(--fg); }
+.ai-call-list { display: flex; flex-direction: column; gap: 0.35em; margin-top: 0.4em; }
+.ai-call {
+  border-left: 3px solid var(--border);
+  padding: 0.35em 0.55em;
+  background: var(--code);
+  border-radius: 4px;
+}
+.ai-call.fail { border-left-color: var(--err); }
+.ai-call.synth { border-left-color: var(--warn); }
+.ai-call-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45em;
+  align-items: center;
+  font-size: 0.88em;
+}
+.ai-call-head code { background: transparent; padding: 0; color: var(--fg); }
+.ai-call-body { margin-top: 0.4em; }
+.ai-call-body .file-section summary { cursor: pointer; padding: 0.2em 0; color: var(--muted); }
+.ai-call-body .file-section summary code { color: var(--fg); }
+.ai-call-meta {
+  border-collapse: collapse;
+  margin: 0.3em 0 0.5em 0;
+  font-size: 0.85em;
+}
+.ai-call-meta th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 500;
+  padding: 0.1em 0.7em 0.1em 0;
+  vertical-align: top;
+}
+.ai-call-meta td { padding: 0.1em 0; word-break: break-all; }
+.ai-call-meta td code { background: transparent; padding: 0; color: var(--fg); }
 .toast {
   position: fixed; bottom: 1.2em; left: 50%; transform: translateX(-50%);
   background: var(--panel-2); border: 1px solid var(--accent);
