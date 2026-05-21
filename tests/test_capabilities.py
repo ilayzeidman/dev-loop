@@ -96,6 +96,35 @@ def test_replay_capabilities_read_scenario_files(tmp_path: Path):
     assert res.data["warnings"] == ["w"]
 
 
+def test_audit_redacts_error_field():
+    """A capability ``error`` string can carry secrets (an upstream system
+    might echo back an Authorization header on failure). The audit record
+    is persisted to disk and must not preserve that secret verbatim."""
+    from harness.capabilities.base import Capability
+    from harness.capabilities.registry import CapabilityRegistry, CapabilitySpec
+
+    class _Leaky(Capability):
+        def invoke(self, *, params, manifest, ctx):
+            return CapabilityResult(
+                status="error",
+                error="upstream failed: Authorization: Bearer ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+
+    reg = CapabilityRegistry()
+    reg._specs["x"] = CapabilitySpec(
+        name="x", category="local_only", agent_requestable=False,
+        timeout_seconds=60, uses_run_manifest=False, redacts_output=True,
+        audit=True, prod_possible=False, forced_params={}, impl=_Leaky(),
+    )
+    seen: list[dict] = []
+    reg.set_audit_sink(seen.append)
+    reg.invoke("x", params={}, manifest={}, ctx={})
+    assert seen, "audit record should have been emitted"
+    err = seen[0]["error"]
+    assert "ghp_" not in err
+    assert "[REDACTED]" in err
+
+
 def test_soft_timeout_warning_tolerates_non_dict_data():
     """A capability impl that returns ``data=None`` (e.g. ``CapabilityResult(
     status='error', data=None, error=...)``) must not crash the registry's

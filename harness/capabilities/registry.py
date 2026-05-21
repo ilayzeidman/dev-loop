@@ -187,13 +187,17 @@ class CapabilityRegistry:
         result: CapabilityResult,
         from_agent: bool,
     ) -> None:
+        # Redact ``error`` as well: an impl exception or upstream-system
+        # error message may carry credentials (e.g. a connection string,
+        # an Authorization header echoed back) and the audit log is a
+        # persisted artifact we don't want to be the place a secret lands.
         record = {
             "ts_utc": utc_now_iso(),
             "capability": name,
             "from_agent": from_agent,
             "params": redact(params),
             "status": result.status,
-            "error": result.error,
+            "error": redact(result.error) if result.error is not None else None,
         }
         if self._audit_sink is not None:
             self._audit_sink(record)

@@ -326,7 +326,17 @@ class Orchestrator:
             attempts.append(record)
             final_attempt = record
         else:
+            budget_hit = False
             for attempt in range(1, self.cfg.policy.max_validation_attempts_per_iteration + 1):
+                # Wall-clock budget can be blown DURING an iteration if a
+                # single attempt's agent phases (impl + triage + diagnostic
+                # rounds) run long. Subprocess-level timeouts bound each
+                # phase, but the cumulative budget needs its own check
+                # (design §12) — otherwise a single iteration can keep
+                # spending well past ``max_total_wall_clock_minutes``.
+                if self.state.wall_clock_minutes() >= self.cfg.policy.max_total_wall_clock_minutes:
+                    budget_hit = True
+                    break
                 attempt_index = attempt
                 record = self._run_validation_attempt(
                     ledger=ledger,
@@ -346,6 +356,29 @@ class Orchestrator:
                     break
                 if record["triage"]["next_action"] != "rerun_same_code":
                     break
+            # If we hit the budget before producing any attempt, synthesize
+            # a placeholder final_attempt so the outer loop and the report
+            # writer don't trip on ``None`` (they index into
+            # ``final_attempt["e2e"]["status"]`` etc).
+            if final_attempt is None and budget_hit:
+                final_attempt = {
+                    "attempt": 0,
+                    "outcome": "budget_exceeded_before_attempt",
+                    "e2e": {"status": "failed",
+                            "first_error": "wall-clock budget exceeded"},
+                    "triage": {
+                        "type": "failure_triage",
+                        "failure_class": "harness_suspected",
+                        "confidence": "high",
+                        "next_action": "stop_inconclusive",
+                        "hypothesis": "wall-clock budget exceeded",
+                        "expected_effect": "",
+                        "evidence_refs": [],
+                        "requested_diagnostics": [],
+                        "human_reason": "budget_exceeded",
+                    },
+                    "dossier": None,
+                }
 
         iter_manifest = {
             "task_id": ledger.task_id,
@@ -535,6 +568,8 @@ class Orchestrator:
         while (
             triage.get("next_action") == "request_more_diagnostics"
             and rounds < self.cfg.policy.max_diagnostic_rounds_per_failure
+            and self.state.wall_clock_minutes()
+            < self.cfg.policy.max_total_wall_clock_minutes
         ):
             rounds += 1
             extra = self._fulfill_diagnostic_requests(
@@ -543,7 +578,12 @@ class Orchestrator:
                 attempt_dir=attempt_dir,
                 round_idx=rounds,
             )
-            dossier = {**dossier, "extra_diagnostics": extra}
+            # Re-redact: ``result.data`` from each capability is already
+            # redacted by the registry, but ``result.error`` and the
+            # wrapping ``request`` dict are not. Anything that crosses the
+            # trust boundary into ``triage_input`` (which is fed to the
+            # agent prompt) must be redacted (design §15, §16).
+            dossier = {**dossier, "extra_diagnostics": redact(extra)}
             triage_input["dossier"] = dossier
             triage_res = self.runner.run_phase(
                 AgentPhase.FAILURE_TRIAGE,
