@@ -1178,3 +1178,191 @@ def test_palette_listed_in_index_doc(tmp_path: Path):
         assert status == 200
         assert 'id="palette-input"' in body
         assert "⌘K" in body
+
+
+# ----- /api/runs/trends (per-goal sparkline data) -------------------------
+
+
+def test_trends_endpoint_groups_by_goal(tmp_path: Path):
+    """Two runs of the same goal cluster into one bucket; a third under
+    a different goal lives in its own."""
+    _write_run(tmp_path, "r1", goal="add login flow",
+               created="2026-05-20T10:00:00Z",
+               updated="2026-05-20T10:01:30Z",
+               iterations=[{"i": 1, "final_e2e_status": "passed",
+                            "patch_hash": "p1"}])
+    _write_run(tmp_path, "r2", goal="add login flow",
+               created="2026-05-21T10:00:00Z",
+               updated="2026-05-21T10:00:45Z",
+               iterations=[
+                   {"i": 1, "final_e2e_status": "failed", "patch_hash": "p1"},
+                   {"i": 2, "final_e2e_status": "passed", "patch_hash": "p2"},
+               ])
+    _write_run(tmp_path, "r3", goal="rename column",
+               created="2026-05-21T11:00:00Z",
+               updated="2026-05-21T11:00:20Z",
+               iterations=[{"i": 1, "final_e2e_status": "passed",
+                            "patch_hash": "x"}])
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/runs/trends")
+        assert status == 200
+        data = json.loads(body)
+        keys = {b["key"] for b in data["buckets"]}
+        assert keys == {"add login flow", "rename column"}
+        login = next(b for b in data["buckets"]
+                     if b["key"] == "add login flow")
+        assert login["stats"]["count"] == 2
+        assert [s["task_id"] for s in login["series"]] == ["r1", "r2"]
+        # last_* tracks the chronologically last entry, not the first.
+        assert login["last_run_id"] == "r2"
+
+
+def test_trends_endpoint_normalises_whitespace_in_goal(tmp_path: Path):
+    """A trailing space or duplicated whitespace shouldn't split the
+    bucket — users re-type goals all the time."""
+    _write_run(tmp_path, "r1", goal="fix  spacing  bug",
+               created="2026-05-20T10:00:00Z",
+               updated="2026-05-20T10:00:30Z")
+    _write_run(tmp_path, "r2", goal=" fix spacing bug ",
+               created="2026-05-21T10:00:00Z",
+               updated="2026-05-21T10:00:30Z")
+    with _server(tmp_path) as (port, _):
+        data = json.loads(_get(port, "/api/runs/trends")[1])
+        assert len(data["buckets"]) == 1
+        assert data["buckets"][0]["stats"]["count"] == 2
+
+
+def test_trends_endpoint_runs_with_no_goal_go_to_ungrouped(tmp_path: Path):
+    """Manifests with an empty implementation_goal don't make spurious
+    1-element buckets; they count toward ``ungrouped_count`` instead."""
+    _write_run(tmp_path, "r1", goal="",
+               created="2026-05-20T10:00:00Z",
+               updated="2026-05-20T10:00:30Z")
+    _write_run(tmp_path, "r2", goal="something",
+               created="2026-05-21T10:00:00Z",
+               updated="2026-05-21T10:00:30Z")
+    with _server(tmp_path) as (port, _):
+        data = json.loads(_get(port, "/api/runs/trends")[1])
+        assert data["ungrouped_count"] == 1
+        assert [b["key"] for b in data["buckets"]] == ["something"]
+        assert data["total_runs"] == 2
+
+
+def test_trends_endpoint_empty_when_no_runs(tmp_path: Path):
+    """A fresh repo returns the shape, not a 404, so the client can
+    render "run more to see trends" without an error path."""
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/runs/trends")
+        assert status == 200
+        data = json.loads(body)
+        assert data == {"buckets": [], "ungrouped_count": 0, "total_runs": 0}
+
+
+def test_trends_endpoint_skips_corrupt_manifests(tmp_path: Path):
+    """An unreadable task_manifest.json must not 500 the whole endpoint."""
+    _write_run(tmp_path, "good", goal="ok",
+               created="2026-05-20T10:00:00Z",
+               updated="2026-05-20T10:00:30Z")
+    bad = tmp_path / ".dev-loop" / "runs" / "bad"
+    bad.mkdir(parents=True)
+    (bad / "task_manifest.json").write_text("{not json")
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/runs/trends")
+        assert status == 200
+        data = json.loads(body)
+        # The good run is grouped; the corrupt one is silently skipped.
+        assert [b["key"] for b in data["buckets"]] == ["ok"]
+        assert data["total_runs"] == 1
+
+
+def test_trends_stats_helper_computes_split_deltas():
+    """``_trend_bucket_stats`` is pure: feed a 4-run series and verify
+    the first-half / second-half split is reported."""
+    from harness.ui.server import _trend_bucket_stats
+    series = [
+        {"task_id": "r1", "status": "failed_e2e", "failed": True,
+         "iterations": 4, "duration_seconds": 120,
+         "created_at_utc": "2026-05-20T10:00:00Z"},
+        {"task_id": "r2", "status": "failed_e2e", "failed": True,
+         "iterations": 3, "duration_seconds": 90,
+         "created_at_utc": "2026-05-20T11:00:00Z"},
+        {"task_id": "r3", "status": "passed", "failed": False,
+         "iterations": 2, "duration_seconds": 60,
+         "created_at_utc": "2026-05-20T12:00:00Z"},
+        {"task_id": "r4", "status": "passed", "failed": False,
+         "iterations": 1, "duration_seconds": 30,
+         "created_at_utc": "2026-05-20T13:00:00Z"},
+    ]
+    s = _trend_bucket_stats(series)
+    assert s["count"] == 4
+    assert s["pass_count"] == 2
+    assert s["fail_count"] == 2
+    assert s["pass_rate"] == 0.5
+    assert s["median_iterations"] == 2.5
+    # First half all fails -> 0; second half all passes -> 1 -> +1.0 delta.
+    assert s["pass_rate_first_half"] == 0.0
+    assert s["pass_rate_second_half"] == 1.0
+    assert s["pass_rate_delta"] == 1.0
+    # Iteration counts dropped from median 3.5 to median 1.5 -> -2.0.
+    assert s["iterations_delta"] == -2.0
+    # Duration dropped from median 105 to median 45 -> -60.
+    assert s["duration_delta"] == -60
+
+
+def test_trends_stats_helper_skips_split_under_four_runs():
+    """With <4 runs we don't pretend to have a trend — only count
+    and aggregate stats come back."""
+    from harness.ui.server import _trend_bucket_stats
+    s = _trend_bucket_stats([
+        {"task_id": "r1", "status": "passed", "failed": False,
+         "iterations": 1, "duration_seconds": 10,
+         "created_at_utc": "2026-05-20T10:00:00Z"},
+        {"task_id": "r2", "status": "failed_e2e", "failed": True,
+         "iterations": 2, "duration_seconds": 20,
+         "created_at_utc": "2026-05-20T11:00:00Z"},
+        {"task_id": "r3", "status": "passed", "failed": False,
+         "iterations": 3, "duration_seconds": 30,
+         "created_at_utc": "2026-05-20T12:00:00Z"},
+    ])
+    assert s["count"] == 3
+    assert "pass_rate_delta" not in s
+    assert "iterations_delta" not in s
+    assert s["median_iterations"] == 2
+
+
+def test_trends_buckets_sorted_by_activity_then_recency(tmp_path: Path):
+    """Most-run-bucket first; ties broken by which had the latest run.
+    Keeps the most interesting trends at the top of the sidebar."""
+    _write_run(tmp_path, "r1", goal="quiet goal",
+               created="2026-05-21T11:00:00Z",
+               updated="2026-05-21T11:00:30Z")
+    _write_run(tmp_path, "r2", goal="busy goal",
+               created="2026-05-20T10:00:00Z",
+               updated="2026-05-20T10:00:30Z")
+    _write_run(tmp_path, "r3", goal="busy goal",
+               created="2026-05-20T11:00:00Z",
+               updated="2026-05-20T11:00:30Z")
+    _write_run(tmp_path, "r4", goal="busy goal",
+               created="2026-05-20T12:00:00Z",
+               updated="2026-05-20T12:00:30Z")
+    with _server(tmp_path) as (port, _):
+        data = json.loads(_get(port, "/api/runs/trends")[1])
+        order = [b["key"] for b in data["buckets"]]
+        assert order == ["busy goal", "quiet goal"]
+
+
+def test_palette_exposes_trends_action(tmp_path: Path):
+    """``trends.show`` is in the palette so users discover the
+    per-goal sparklines via Cmd+K, not just by scrolling the sidebar."""
+    with _server(tmp_path) as (port, _):
+        items = json.loads(_get(port, "/api/palette")[1])["items"]
+        action_ids = {it["id"] for it in items if it["kind"] == "action"}
+        assert "trends.show" in action_ids
+
+
+def test_trends_mount_listed_in_index_doc(tmp_path: Path):
+    """index.html ships the run-trends mount so the sparklines have
+    a home even on a cold cache."""
+    with _server(tmp_path) as (port, _):
+        _, body = _get(port, "/")
+        assert 'id="run-trends"' in body

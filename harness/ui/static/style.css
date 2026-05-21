@@ -209,6 +209,64 @@ button:disabled { opacity: 0.55; cursor: not-allowed; filter: none; }
 }
 .run-list .day-header:first-child { margin-top: 0; }
 
+/* Analyze: per-goal trend strips --------------------------------------- */
+.run-trends {
+  margin: 0 0 0.6em 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  font-size: 0.82em;
+}
+.run-trends.hidden { display: none; }
+.trends-header {
+  border-bottom: 1px solid var(--border);
+}
+.trends-header:last-child { border-bottom: none; }
+.trends-toggle {
+  width: 100%;
+  display: flex; gap: 0.5em; align-items: center;
+  padding: 0.4em 0.6em;
+  background: transparent; border: 0; color: var(--fg);
+  font-size: inherit; font-weight: 600; cursor: pointer;
+  text-align: left; text-transform: none; letter-spacing: 0;
+}
+.trends-toggle:hover { background: #1f2530; }
+.trends-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.trends-caret { width: 1em; color: var(--muted); }
+.trends-meta { font-size: 0.78em; font-weight: 400; margin-left: auto; }
+.trend-row {
+  padding: 0.45em 0.6em;
+  border-bottom: 1px solid var(--border);
+  display: grid; gap: 0.25em;
+}
+.trend-row:last-child { border-bottom: none; }
+.trend-goal {
+  font-weight: 500; color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.trend-stats {
+  display: flex; gap: 0.4em; align-items: center; flex-wrap: wrap;
+  font-size: 0.78em;
+}
+.trend-stats .muted { color: var(--muted); }
+.trend-delta { font-weight: 600; }
+.trend-delta.pass { color: var(--ok); }
+.trend-delta.fail { color: var(--err); }
+.trend-spark { margin-top: 0.15em; }
+.spark { display: block; overflow: visible; }
+.spark .spark-line {
+  fill: none; stroke: var(--muted); stroke-width: 1.2;
+  stroke-linejoin: round; stroke-linecap: round; opacity: 0.55;
+}
+.spark .spark-dot { cursor: pointer; stroke: var(--panel-2); stroke-width: 1; }
+.spark .spark-dot.pass { fill: var(--ok); }
+.spark .spark-dot.fail { fill: var(--err); }
+.spark .spark-dot.other { fill: var(--warn); }
+.spark .spark-dot:hover { stroke: var(--fg); stroke-width: 1.5; }
+.spark .spark-dot:focus-visible {
+  stroke: var(--accent); stroke-width: 2; outline: none;
+}
+
 /* Analyze: hero --------------------------------------------------------- */
 .run-hero {
   display: grid; gap: 0.6em;

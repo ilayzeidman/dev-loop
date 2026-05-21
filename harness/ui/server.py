@@ -7,6 +7,7 @@ Read endpoints
   GET  /api/config/raw                   raw config.yaml text
   GET  /api/onboarding                   first-run setup checklist
   GET  /api/runs                         list of task runs + active jobs
+  GET  /api/runs/trends                  per-goal trend buckets + sparkline data
   GET  /api/runs/<task-id>               task manifest
   GET  /api/runs/<task-id>/report        rendered Markdown report
   GET  /api/runs/<task-id>/report.json   structured report
@@ -246,6 +247,7 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             if p == "/api/config/raw": self._api_config_raw(); return
             if p == "/api/onboarding": self._api_onboarding(); return
             if p == "/api/runs": self._api_list_runs(); return
+            if p == "/api/runs/trends": self._api_runs_trends(); return
             if p == "/api/scenarios": self._api_list_scenarios(); return
             if p == "/api/capabilities": self._api_list_capabilities(); return
             if p == "/api/playbooks": self._api_list_playbooks(); return
@@ -650,6 +652,10 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                         "duration_seconds": _run_duration_seconds(data),
                     })
             self._send_json(200, {"runs": out, "jobs": jobs.list()})
+
+        def _api_runs_trends(self) -> None:
+            _, r = _resolved()
+            self._send_json(200, _summarize_trends(r.runs_dir))
 
         def _api_run_subroute(self, sub: str) -> None:
             _, r = _resolved()
@@ -1105,6 +1111,13 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 "keywords": "compare diff two runs side by side delta analyze",
             })
             items.append({
+                "kind": "action", "id": "trends.show",
+                "title": "Show goal trends",
+                "subtitle": "per-goal sparkline of pass-rate + iteration count",
+                "group": "Actions",
+                "keywords": "trends sparkline history pass rate analyze graph",
+            })
+            items.append({
                 "kind": "action", "id": "shortcuts.help",
                 "title": "Keyboard shortcuts",
                 "subtitle": "show the cheat-sheet",
@@ -1393,6 +1406,160 @@ def _compare_deltas(a: dict[str, Any] | None,
             (b["audit"]["total"] or 0) - (a["audit"]["total"] or 0)
         ),
     }
+
+
+def _trend_bucket_key(goal: str | None) -> str:
+    """Group runs by a normalized implementation goal.
+
+    Whitespace-folded so trivially re-typed goals still cluster together;
+    blank or missing goals sort into the ``""`` bucket which the caller
+    treats as "ungrouped" and excludes from the trends payload.
+    """
+    if not goal:
+        return ""
+    return " ".join(goal.split()).strip()
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    if n % 2:
+        return float(s[mid])
+    return (s[mid - 1] + s[mid]) / 2.0
+
+
+def _trend_bucket_stats(series: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compute first-half vs second-half medians + pass-rate.
+
+    ``series`` is ordered oldest → newest. With <4 runs we still return
+    pass_rate but skip the split deltas so we don't pretend a 2-run
+    sample tells us anything about a trend direction.
+    """
+    n = len(series)
+    pass_n = sum(1 for s in series if s["status"] == "passed")
+    fail_n = sum(1 for s in series if s["failed"])
+    other_n = n - pass_n - fail_n
+    iters = [s["iterations"] for s in series if s["iterations"] is not None]
+    durs = [s["duration_seconds"] for s in series
+            if s["duration_seconds"] is not None]
+    stats: dict[str, Any] = {
+        "count": n,
+        "pass_count": pass_n,
+        "fail_count": fail_n,
+        "other_count": other_n,
+        "pass_rate": (pass_n / n) if n else 0.0,
+        "median_iterations": _median(iters),
+        "median_duration_seconds": _median(durs),
+    }
+    if n >= 4:
+        cut = n // 2
+        first = series[:cut]
+        second = series[cut:]
+        fp = sum(1 for s in first if s["status"] == "passed") / len(first)
+        sp = sum(1 for s in second if s["status"] == "passed") / len(second)
+        fi = _median([s["iterations"] for s in first
+                      if s["iterations"] is not None])
+        si = _median([s["iterations"] for s in second
+                      if s["iterations"] is not None])
+        fd = _median([s["duration_seconds"] for s in first
+                      if s["duration_seconds"] is not None])
+        sd = _median([s["duration_seconds"] for s in second
+                      if s["duration_seconds"] is not None])
+        stats["pass_rate_first_half"] = fp
+        stats["pass_rate_second_half"] = sp
+        stats["pass_rate_delta"] = sp - fp
+        stats["iterations_first_half"] = fi
+        stats["iterations_second_half"] = si
+        stats["iterations_delta"] = (
+            (si - fi) if (fi is not None and si is not None) else None
+        )
+        stats["duration_first_half"] = fd
+        stats["duration_second_half"] = sd
+        stats["duration_delta"] = (
+            (sd - fd) if (fd is not None and sd is not None) else None
+        )
+    return stats
+
+
+def _summarize_trends(runs_dir: Path) -> dict[str, Any]:
+    """Group every run on disk by implementation goal and emit one
+    bucket per goal with chronological series + stats. Single-run goals
+    are returned too so the UI can show "run more to see trends"
+    without doing a second probe. The ``ungrouped`` bucket collects
+    runs with no goal — also useful to surface vs silently dropping.
+    """
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    ungrouped: list[dict[str, Any]] = []
+    if runs_dir.exists():
+        for d in sorted(runs_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            tm = d / "task_manifest.json"
+            if not tm.exists():
+                continue
+            try:
+                data = read_json(tm)
+            except Exception:
+                continue
+            tc = data.get("task_contract") or {}
+            goal = tc.get("implementation_goal") if isinstance(tc, dict) else None
+            key = _trend_bucket_key(goal if isinstance(goal, str) else None)
+            status = data.get("final_status") or data.get("status")
+            entry = {
+                "task_id": data.get("task_id", d.name),
+                "status": status,
+                "failed": isinstance(status, str) and status.startswith("failed"),
+                "iterations": _count_iterations(d),
+                "duration_seconds": _run_duration_seconds(data),
+                "created_at_utc": data.get("created_at_utc"),
+            }
+            if key:
+                buckets.setdefault(key, []).append(entry)
+            else:
+                ungrouped.append(entry)
+
+    out_buckets: list[dict[str, Any]] = []
+    for key, items in buckets.items():
+        items.sort(key=lambda e: e.get("created_at_utc") or "")
+        first_goal = key
+        # Most recent run wins for last_status / last_run_id so the
+        # tooltip surfaces the latest outcome, not the oldest.
+        last = items[-1]
+        out_buckets.append({
+            "key": key,
+            "goal": first_goal,
+            "series": items,
+            "last_run_id": last["task_id"],
+            "last_status": last["status"],
+            "last_created_at_utc": last["created_at_utc"],
+            "stats": _trend_bucket_stats(items),
+        })
+    # Stable, useful default order: most active bucket first, then by
+    # most recent run inside it. ``count desc, last_created_at_utc desc``.
+    out_buckets.sort(
+        key=lambda b: (-b["stats"]["count"],
+                       -(_iso_sort_key(b["last_created_at_utc"]))),
+    )
+    return {
+        "buckets": out_buckets,
+        "ungrouped_count": len(ungrouped),
+        "total_runs": sum(b["stats"]["count"] for b in out_buckets) + len(ungrouped),
+    }
+
+
+def _iso_sort_key(ts: str | None) -> int:
+    """Cheap sortable integer for ISO-8601 zulu timestamps; missing
+    values land at 0 so they sort oldest."""
+    if not ts:
+        return 0
+    try:
+        t = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return 0
+    return int(t.timestamp())
 
 
 def _summarize_attempts(iter_dir: Path) -> dict[str, Any]:

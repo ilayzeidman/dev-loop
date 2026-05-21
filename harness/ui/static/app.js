@@ -1269,11 +1269,177 @@ async function pollJob() {
 let CURRENT_TASK = null;
 let RUNS_CACHE = [];
 let RUN_FILTER = "";
+let TRENDS_CACHE = {buckets: [], ungrouped_count: 0, total_runs: 0};
+let TRENDS_COLLAPSED = false;
+let TRENDS_COMPARE_PICK = null;  // first task_id when shift-clicking a 2nd point
 
 async function refreshAnalyzeTab() {
-  const {runs} = await getJSON("/api/runs");
-  RUNS_CACHE = runs;
+  const [runsRes, trendsRes] = await Promise.all([
+    getJSON("/api/runs"),
+    getJSON("/api/runs/trends").catch(() => (
+      {buckets: [], ungrouped_count: 0, total_runs: 0})),
+  ]);
+  RUNS_CACHE = runsRes.runs;
+  TRENDS_CACHE = trendsRes;
+  renderTrends();
   renderRunList();
+}
+
+function renderTrends() {
+  const wrap = $("#run-trends");
+  if (!wrap) return;
+  const eligible = (TRENDS_CACHE.buckets || []).filter(b => b.stats.count >= 2);
+  if (!eligible.length) {
+    wrap.innerHTML = "";
+    wrap.classList.add("hidden");
+    return;
+  }
+  wrap.classList.remove("hidden");
+  const header = `
+    <div class="trends-header">
+      <button class="trends-toggle" type="button"
+        aria-expanded="${!TRENDS_COLLAPSED}"
+        aria-controls="run-trends-body"
+        title="Show or hide goal trends">
+        <span class="trends-caret">${TRENDS_COLLAPSED ? "▸" : "▾"}</span>
+        <span>Trends</span>
+        <span class="muted trends-meta">${eligible.length} goal${eligible.length === 1 ? "" : "s"} · ${TRENDS_CACHE.total_runs} runs</span>
+      </button>
+    </div>`;
+  if (TRENDS_COLLAPSED) {
+    wrap.innerHTML = header + '<div id="run-trends-body" hidden></div>';
+    bindTrendsToggle();
+    return;
+  }
+  const body = eligible.map(renderTrendBucket).join("");
+  wrap.innerHTML = header + `<div id="run-trends-body">${body}</div>`;
+  bindTrendsToggle();
+  bindTrendSparklines();
+}
+
+function bindTrendsToggle() {
+  const btn = $(".trends-toggle");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    TRENDS_COLLAPSED = !TRENDS_COLLAPSED;
+    renderTrends();
+  });
+}
+
+function renderTrendBucket(b) {
+  const s = b.stats;
+  const pct = Math.round(s.pass_rate * 100);
+  const pctCls = s.pass_rate >= 0.8 ? "pass"
+    : s.pass_rate >= 0.5 ? "warn" : "fail";
+  const itersTxt = s.median_iterations != null
+    ? `${formatMedian(s.median_iterations)} iter` : "";
+  const durTxt = s.median_duration_seconds != null
+    ? formatDuration(Math.round(s.median_duration_seconds)) : "";
+  const delta = renderTrendDeltas(s);
+  const spark = buildSparkline(b);
+  const goalText = b.goal || "(no goal)";
+  return `
+    <div class="trend-row" data-key="${escapeAttr(b.key)}">
+      <div class="trend-goal" title="${escapeAttr(b.goal)}">${escapeHtml(truncate(goalText, 80))}</div>
+      <div class="trend-stats">
+        <span class="pill ${pctCls}" title="${s.pass_count}/${s.count} passed">${pct}% pass</span>
+        ${itersTxt ? `<span class="muted">${escapeHtml(itersTxt)}</span>` : ""}
+        ${durTxt ? `<span class="muted">${escapeHtml(durTxt)}</span>` : ""}
+        ${delta}
+      </div>
+      <div class="trend-spark">${spark}</div>
+    </div>`;
+}
+
+function renderTrendDeltas(s) {
+  if (s.pass_rate_delta == null && s.iterations_delta == null) return "";
+  const parts = [];
+  if (s.pass_rate_delta != null) {
+    const d = Math.round(s.pass_rate_delta * 100);
+    const cls = d > 0 ? "pass" : d < 0 ? "fail" : "";
+    const arrow = d > 0 ? "▲" : d < 0 ? "▼" : "·";
+    parts.push(
+      `<span class="trend-delta ${cls}" title="pass-rate, 2nd half − 1st half">${arrow} ${Math.abs(d)}pp</span>`,
+    );
+  }
+  if (s.iterations_delta != null) {
+    // Fewer iterations is better, so flip sense: negative = green.
+    const d = s.iterations_delta;
+    const cls = d < 0 ? "pass" : d > 0 ? "fail" : "";
+    const arrow = d < 0 ? "▼" : d > 0 ? "▲" : "·";
+    parts.push(
+      `<span class="trend-delta ${cls}" title="median iterations, 2nd half − 1st half">${arrow} ${Math.abs(d).toFixed(1)} iter</span>`,
+    );
+  }
+  return parts.join(" ");
+}
+
+function formatMedian(v) {
+  return Number.isInteger(v) ? String(v) : v.toFixed(1);
+}
+
+function buildSparkline(b) {
+  const pts = b.series;
+  const n = pts.length;
+  const w = Math.max(60, Math.min(220, 14 * n + 8));
+  const h = 28;
+  const padX = 6;
+  const padY = 4;
+  const iters = pts.map(p => p.iterations || 0);
+  const maxIter = Math.max(1, ...iters);
+  const minIter = Math.min(...iters);
+  const range = Math.max(1, maxIter - minIter);
+  const xStep = n > 1 ? (w - 2 * padX) / (n - 1) : 0;
+  const ys = pts.map(p => {
+    const v = p.iterations || 0;
+    return h - padY - ((v - minIter) / range) * (h - 2 * padY);
+  });
+  const xs = pts.map((_, i) => padX + i * xStep);
+  let path = "";
+  for (let i = 0; i < n; i++) {
+    path += (i === 0 ? "M" : "L") + xs[i].toFixed(1) + "," + ys[i].toFixed(1);
+  }
+  const dots = pts.map((p, i) => {
+    const cls = p.status === "passed" ? "pass"
+      : p.failed ? "fail" : "other";
+    const title = `${p.task_id}\n${p.status || "?"} · ${p.iterations || 0} iter`
+      + (p.duration_seconds != null ? ` · ${formatDuration(p.duration_seconds)}` : "")
+      + (p.created_at_utc ? `\n${p.created_at_utc}` : "")
+      + "\nclick: open · shift-click 2 to compare";
+    return `<circle class="spark-dot ${cls}" cx="${xs[i].toFixed(1)}" cy="${ys[i].toFixed(1)}" r="3.2" data-id="${escapeAttr(p.task_id)}" tabindex="0" role="button" aria-label="run ${escapeAttr(p.task_id)} ${escapeAttr(p.status || "")}"><title>${escapeHtml(title)}</title></circle>`;
+  }).join("");
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="${pts.length} runs, oldest to newest">`
+    + `<path class="spark-line" d="${path}"/>${dots}</svg>`;
+}
+
+function bindTrendSparklines() {
+  $$(".spark-dot").forEach(c => {
+    c.addEventListener("click", e => onSparkClick(e, c.dataset.id));
+    c.addEventListener("keydown", e => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        onSparkClick(e, c.dataset.id);
+      }
+    });
+  });
+}
+
+function onSparkClick(ev, taskId) {
+  if (!taskId) return;
+  if (ev.shiftKey) {
+    if (!TRENDS_COMPARE_PICK || TRENDS_COMPARE_PICK === taskId) {
+      TRENDS_COMPARE_PICK = taskId;
+      toast("shift-click another point to compare");
+      return;
+    }
+    const a = TRENDS_COMPARE_PICK;
+    TRENDS_COMPARE_PICK = null;
+    location.hash = "#/compare/" + encodeURIComponent(a)
+      + "/" + encodeURIComponent(taskId);
+    return;
+  }
+  TRENDS_COMPARE_PICK = null;
+  selectRun(taskId);
 }
 
 function renderRunList() {
@@ -2454,6 +2620,21 @@ function runPaletteAction(id) {
   }
   if (id === "shortcuts.help") {
     openShortcutsHelp();
+    return;
+  }
+  if (id === "trends.show") {
+    showTab("analyze");
+    refreshAnalyzeTab().then(() => {
+      TRENDS_COLLAPSED = false;
+      renderTrends();
+      const wrap = $("#run-trends");
+      if (wrap) wrap.scrollIntoView({block: "nearest"});
+      const buckets = (TRENDS_CACHE.buckets || [])
+        .filter(b => b.stats.count >= 2);
+      toast(buckets.length
+        ? `${buckets.length} goal${buckets.length === 1 ? "" : "s"} with 2+ runs`
+        : "no goal has 2+ runs yet — kick off another");
+    }).catch(() => {});
     return;
   }
   if (id === "compare.runs") {
