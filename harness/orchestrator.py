@@ -141,14 +141,50 @@ class Orchestrator:
                 ledger.update_task_manifest(status="stopped", stop_reason=stop_reason)
                 break
 
-            iter_record = self._run_iteration(
-                ledger=ledger,
-                iteration=iteration,
-                base_sha=base_sha,
-                contract=contract,
-                prev_failure_dossier=prev_failure_dossier,
-                prev_iteration_summary=prev_iteration_summary,
-            )
+            try:
+                iter_record = self._run_iteration(
+                    ledger=ledger,
+                    iteration=iteration,
+                    base_sha=base_sha,
+                    contract=contract,
+                    prev_failure_dossier=prev_failure_dossier,
+                    prev_iteration_summary=prev_iteration_summary,
+                )
+            except Exception as e:
+                # An unexpected failure inside the iteration (sandbox prep
+                # blew up, the runner crashed, disk full, etc.) must not
+                # leave the task ledger half-written. Record a synthesized
+                # failed-iteration record so ``_write_report`` and the
+                # outer loop have well-formed state, then stop the loop
+                # with ``failed_inconclusive``.
+                reason = f"iteration {iteration} crashed: {type(e).__name__}: {e}"
+                try:
+                    ledger.write_iteration_manifest(iteration, {
+                        "task_id": ledger.task_id,
+                        "iteration": iteration,
+                        "code": {
+                            "base_sha": base_sha,
+                            "patch_hash": None,
+                            "changed_files": [],
+                            "claim_mismatches": {},
+                        },
+                        "agent_output": None,
+                        "attempts": [],
+                        "final_e2e_status": "failed",
+                        "error": reason,
+                    })
+                except Exception:
+                    # If even the manifest write fails, fall through —
+                    # we still want to terminate cleanly below.
+                    pass
+                iter_record = _failed_iteration_record(
+                    iteration=iteration, reason=reason,
+                )
+                iteration_records.append(iter_record)
+                self.state.code_iterations_done += 1
+                last_triage = iter_record["final_attempt"]["triage"]
+                hit_stop_reason = "harness_issue_declared"
+                break
             iteration_records.append(iter_record)
             self.state.code_iterations_done += 1
 

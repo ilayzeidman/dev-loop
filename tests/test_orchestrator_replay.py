@@ -548,6 +548,64 @@ def test_replay_run_actually_applies_patch_to_clean_workspace(tmp_path: Path):
     assert text != "# placeholder\n", text
 
 
+def test_iteration_crash_does_not_leave_ledger_half_written(tmp_path: Path):
+    """If something inside ``_run_iteration`` raises (sandbox prep blew
+    up, runner crashed, disk full, …) the orchestrator must still finish
+    cleanly: write a final review report, mark the task ``completed``,
+    and return a well-formed ``OrchestratorResult``. The original code
+    let the exception propagate, leaving ``task_manifest.json`` in
+    ``contract_ready`` state with no ``final_status``.
+    """
+    from harness.agents.base import AgentPhase, AgentPhaseResult, AgentRunner
+
+    class _CrashingRunner(AgentRunner):
+        provider_name = "crashing"
+        def profile(self):
+            return {"provider": "crashing"}
+        def run_phase(self, phase, *, workspace_path, task_contract,
+                      run_manifest, input_bundle, output_schema_name,
+                      budget_seconds):
+            if phase is AgentPhase.TASK_CONTRACT:
+                return AgentPhaseResult(output={
+                    "type": "task_contract",
+                    "implementation_goal": "x",
+                    "assumptions": [], "success_criteria": ["e2e passes"],
+                    "non_goals": [], "likely_components": [],
+                    "validation_plan": [], "ambiguities": [],
+                    "can_start_without_human": True,
+                }, raw_log="")
+            # Simulate an in-iteration crash (e.g. provider CLI died,
+            # subprocess.CalledProcessError from git, OSError from disk).
+            raise RuntimeError("simulated mid-iteration failure")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed_repo(repo)
+    registry = load_default_registry()
+    cfg = OrchestratorConfig(
+        repo_root=repo,
+        runs_dir=tmp_path / "runs",
+        sandbox_dir=tmp_path / "sb",
+        clean_workspace_dir=tmp_path / "clean",
+        request="crash test",
+        provider="crashing",
+        policy=LoopPolicy(max_code_iterations=2),
+    )
+    orch = Orchestrator(config=cfg, runner=_CrashingRunner(), registry=registry)
+    # This must NOT raise.
+    result = orch.run()
+    # The final report and task manifest must exist and be well-formed.
+    assert result.ledger_dir.is_dir()
+    assert (result.ledger_dir / "final_review_report.json").exists()
+    tm = read_json(result.ledger_dir / "task_manifest.json")
+    assert tm.get("final_status") is not None, tm
+    # The iteration manifest for the crashed iteration was written.
+    iter_manifest = read_json(
+        result.ledger_dir / "iterations" / "iter-001" / "manifest.json"
+    )
+    assert "simulated mid-iteration failure" in (iter_manifest.get("error") or "")
+
+
 def test_replay_run_same_failure_twice_hits_stop_condition(tmp_path: Path):
     """When the same E2E failure repeats, the loop should stop with
     failed_stop_condition rather than falling through to inconclusive."""

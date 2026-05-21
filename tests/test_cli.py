@@ -40,6 +40,24 @@ def test_config_show_emits_json(tmp_path: Path, capsys):
     assert data["default_provider"] == "replay"
 
 
+def test_implement_unknown_provider_clean_error(tmp_path: Path, capsys):
+    """``--provider unknown`` must produce a friendly error and exit 2,
+    not a Python stack trace. End users running ``dev-loop implement``
+    shouldn't see ``Traceback (most recent call last)`` for a typo.
+    """
+    rc = cli.main([
+        "--repo", str(tmp_path),
+        "implement",
+        "--request", "anything",
+        "--provider", "definitely-not-a-real-provider",
+    ])
+    assert rc == 2
+    captured = capsys.readouterr()
+    # Friendly error on stderr, no Python traceback noise.
+    assert "unknown provider" in captured.err.lower()
+    assert "traceback" not in captured.err.lower()
+
+
 def test_schema_validate_ok(tmp_path: Path):
     obj = {
         "type": "task_contract",

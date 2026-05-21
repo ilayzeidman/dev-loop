@@ -125,6 +125,45 @@ def test_audit_redacts_error_field():
     assert "[REDACTED]" in err
 
 
+def test_audit_jsonl_sink_is_thread_safe_for_large_records(tmp_path):
+    """``audit_to_jsonl`` must produce a valid JSONL stream even when
+    invoked from multiple threads with records larger than ``PIPE_BUF``.
+
+    The original implementation issued two separate ``write()`` calls per
+    record (the JSON body, then a newline). Under threading, those calls
+    can interleave, and individual ``write()`` calls only have kernel
+    atomicity up to PIPE_BUF (4096 bytes on Linux). Records carrying big
+    ``params``/``error`` strings can exceed that and would corrupt the
+    audit log. Pin the contract: every recorded line must round-trip
+    through ``json.loads``.
+    """
+    import json
+    import threading
+    from harness.capabilities.registry import audit_to_jsonl
+
+    sink = audit_to_jsonl(tmp_path / "audit.jsonl")
+    big = "x" * 8000  # comfortably above PIPE_BUF
+    threads_n, per_thread = 4, 40
+
+    def writer(tid: int) -> None:
+        for i in range(per_thread):
+            sink({"thread": tid, "iter": i, "payload": big})
+
+    threads = [threading.Thread(target=writer, args=(t,)) for t in range(threads_n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    raw = (tmp_path / "audit.jsonl").read_text(encoding="utf-8")
+    lines = [ln for ln in raw.split("\n") if ln]
+    assert len(lines) == threads_n * per_thread, (len(lines), threads_n * per_thread)
+    # Every line must round-trip cleanly.
+    for ln in lines:
+        rec = json.loads(ln)
+        assert rec["payload"] == big
+
+
 def test_soft_timeout_warning_tolerates_non_dict_data():
     """A capability impl that returns ``data=None`` (e.g. ``CapabilityResult(
     status='error', data=None, error=...)``) must not crash the registry's

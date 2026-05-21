@@ -212,11 +212,29 @@ def load_default_registry(impls_module: str = "harness.capabilities.impls") -> C
 
 
 def audit_to_jsonl(path: Path) -> Callable[[dict[str, Any]], None]:
-    """Return an audit sink that appends JSONL records to ``path``."""
+    """Return an audit sink that appends JSONL records to ``path``.
+
+    The audit log is a persisted forensics artifact; line-level integrity
+    matters. Two concurrency hazards exist:
+
+    1. ``f.write(json.dumps(...))`` followed by ``f.write("\\n")`` is two
+       syscalls — under threading they can interleave, even with O_APPEND.
+    2. Even a single ``write()`` is only atomic on Linux for sizes <=
+       ``PIPE_BUF`` (4096 bytes). Audit records carrying large params or
+       error strings can easily exceed that.
+
+    Both hazards are addressed by serializing the record into one bytes
+    blob (record + newline) AND holding a thread lock for the write. The
+    lock makes correctness independent of the kernel's atomicity rules.
+    """
     import json
+    import threading
     path.parent.mkdir(parents=True, exist_ok=True)
+    lock = threading.Lock()
+
     def sink(rec: dict[str, Any]) -> None:
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, sort_keys=True))
-            f.write("\n")
+        line = (json.dumps(rec, sort_keys=True) + "\n").encode("utf-8")
+        with lock:
+            with path.open("ab") as f:
+                f.write(line)
     return sink

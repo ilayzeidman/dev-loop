@@ -218,7 +218,13 @@ def _cmd_implement(
             print(f"replay scenario not found: {replay_path}", file=sys.stderr)
             return 2
 
-    runner = create_runner(provider, replay_scenario=replay_path)
+    try:
+        runner = create_runner(provider, replay_scenario=replay_path)
+    except ValueError as e:
+        # e.g. unknown provider, or missing --replay-scenario for replay.
+        # Print a clean message instead of a stack trace.
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     registry = load_default_registry()
 
     config = OrchestratorConfig(

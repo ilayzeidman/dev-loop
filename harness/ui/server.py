@@ -624,7 +624,12 @@ def _read_safe_json(p: Path) -> Any:
 
 def _count_iterations(run_dir: Path) -> int:
     iters = run_dir / "iterations"
-    return len(list(iters.iterdir())) if iters.exists() else 0
+    if not iters.exists():
+        return 0
+    # Only count iteration dirs (``iter-NNN/``); a stray file in the dir
+    # (e.g. a .DS_Store from a checkout, or a tmp scratch file) must not
+    # inflate the count or skew downstream summaries.
+    return sum(1 for d in iters.iterdir() if d.is_dir())
 
 
 def _summarize_attempts(iter_dir: Path) -> dict[str, Any]:
