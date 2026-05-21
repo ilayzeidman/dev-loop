@@ -1,0 +1,7 @@
+{
+  "namespace": "dev-ai-validation",
+  "pods": ["encoder-gpu-init-001-0"],
+  "nodes": ["dev-gpu-node-01"],
+  "gpu_ids": ["GPU-0"],
+  "status": "deployed"
+}

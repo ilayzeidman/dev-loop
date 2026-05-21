@@ -1,0 +1,7 @@
+{
+  "jenkins_job": "agent-dev-build",
+  "jenkins_build_id": "553",
+  "status": "ok",
+  "image_tag": "registry/dev/encoder:gpu-init-001",
+  "version": "gpu-init-001"
+}

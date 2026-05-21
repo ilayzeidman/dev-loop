@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "final_review_report.v1.json",
+  "type": "object",
+  "required": [
+    "task_id",
+    "original_request",
+    "task_contract",
+    "agent_profile",
+    "harness_profile",
+    "final_status",
+    "selected_iteration",
+    "iterations",
+    "final_patch_summary",
+    "changed_files",
+    "out_of_scope_files",
+    "validation_evidence",
+    "risk_notes",
+    "human_review_focus_areas"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "task_id": { "type": "string" },
+    "original_request": { "type": "string" },
+    "task_contract": { "type": "object" },
+    "agent_profile": { "type": "object" },
+    "harness_profile": { "type": "object" },
+    "final_status": {
+      "enum": [
+        "passed",
+        "failed_budget_exceeded",
+        "failed_stop_condition",
+        "failed_human_required",
+        "failed_inconclusive"
+      ]
+    },
+    "selected_iteration": { "type": ["integer", "null"] },
+    "iterations": { "type": "array" },
+    "final_patch_summary": { "type": "object" },
+    "changed_files": { "type": "array", "items": { "type": "string" } },
+    "out_of_scope_files": { "type": "array", "items": { "type": "string" } },
+    "validation_evidence": { "type": "object" },
+    "risk_notes": { "type": "array", "items": { "type": "string" } },
+    "human_review_focus_areas": { "type": "array", "items": { "type": "string" } }
+  }
+}

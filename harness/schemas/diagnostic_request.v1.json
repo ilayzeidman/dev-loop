@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "diagnostic_request.v1.json",
+  "type": "object",
+  "required": ["type", "capability", "reason", "params"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "diagnostic_request" },
+    "capability": { "type": "string", "minLength": 1 },
+    "reason": { "type": "string", "minLength": 1 },
+    "params": { "type": "object" }
+  }
+}

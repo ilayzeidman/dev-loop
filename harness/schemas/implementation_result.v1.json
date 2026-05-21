@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "implementation_result.v1.json",
+  "type": "object",
+  "required": [
+    "type",
+    "summary",
+    "hypothesis",
+    "confidence",
+    "expected_validation",
+    "risk_notes",
+    "claimed_changed_files"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "implementation_result" },
+    "summary": { "type": "string", "minLength": 1 },
+    "hypothesis": { "type": "string" },
+    "confidence": { "enum": ["low", "medium", "high"] },
+    "expected_validation": { "type": "array", "items": { "type": "string" } },
+    "risk_notes": { "type": "array", "items": { "type": "string" } },
+    "claimed_changed_files": { "type": "array", "items": { "type": "string" } }
+  }
+}

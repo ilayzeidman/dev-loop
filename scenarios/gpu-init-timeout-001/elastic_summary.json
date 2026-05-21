@@ -1,0 +1,7 @@
+{
+  "errors": [],
+  "warnings": [
+    {"ts": "2026-05-21T10:00:03Z", "msg": "device_ready poll cycle=12"}
+  ],
+  "total_lines_scanned": 1240
+}
