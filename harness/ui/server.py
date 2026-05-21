@@ -84,6 +84,9 @@ from ..config import (
     write_starter_scenario,
 )
 from ..playbooks import PLAYBOOK_DIR, repo_playbook_dir
+from ..runs import _diff_deltas as _runs_diff_deltas
+from ..runs import audit_rollup as _runs_audit_rollup
+from ..runs import show_run as _runs_show_run
 from ..schemas import SCHEMA_DIR
 from ..scenarios import (
     default_e2e_result,
@@ -1344,89 +1347,46 @@ def _count_iterations(run_dir: Path) -> int:
 def _summarize_run_for_compare(runs_dir: Path, task_id: str) -> dict[str, Any] | None:
     """Compact summary used by the cross-run compare view.
 
+    Thin adapter over :func:`harness.runs.show_run` + :func:`audit_rollup`
+    — the canonical ledger readers in ``harness.runs`` are the source of
+    truth for what a run looks like. We only project iteration fields
+    into the wire shape the UI client expects (``i`` instead of
+    ``iteration``, summary truncated to 240 chars, no ``error`` key) and
+    layer the audit rollup on top.
+
     Returns ``None`` when the run dir or manifest is missing so the
     endpoint can return a partial payload (missing-A or missing-B)
     rather than 404'ing the whole comparison — that's what keeps a
     stale share link from blanking the page.
     """
-    run_root = runs_dir / task_id
-    tm_path = run_root / "task_manifest.json"
-    if not run_root.exists() or not tm_path.exists():
+    canonical = _runs_show_run(runs_dir, task_id)
+    if canonical is None:
         return None
-    try:
-        tm = read_json(tm_path)
-    except Exception:
-        return None
-    tc = tm.get("task_contract") or {}
     iters: list[dict[str, Any]] = []
-    iters_dir = run_root / "iterations"
-    if iters_dir.exists():
-        for d in sorted(d for d in iters_dir.iterdir() if d.is_dir()):
-            im = _read_safe_json(d / "manifest.json")
-            if not isinstance(im, dict):
-                im = {}
-            code = (im.get("code") or {}) if isinstance(im.get("code"), dict) else {}
-            agent_out = im.get("agent_output") or {}
-            summary = ""
-            if isinstance(agent_out, dict):
-                summary = agent_out.get("summary") or ""
-            v = d / "validations"
-            attempt_count = (
-                sum(1 for x in v.iterdir() if x.is_dir())
-                if v.exists() else 0
-            )
-            # Iteration number is the trailing integer of ``iter-NNN``.
-            try:
-                n = int(d.name.rsplit("-", 1)[1])
-            except (IndexError, ValueError):
-                n = len(iters) + 1
-            iters.append({
-                "i": n,
-                "final_e2e_status": im.get("final_e2e_status"),
-                "summary": summary[:240] if isinstance(summary, str) else "",
-                "changed_files": list(code.get("changed_files") or []),
-                "patch_hash": code.get("patch_hash"),
-                "attempts": attempt_count,
-            })
-
-    # Audit roll-up — counts by status and a short list of capability
-    # names so the user can see at-a-glance which side did more work.
-    audit_path = run_root / "capability_audit.jsonl"
-    audit_by_status: dict[str, int] = {}
-    audit_by_capability: dict[str, int] = {}
-    audit_total = 0
-    if audit_path.exists():
-        for line in audit_path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                entry = json.loads(line)
-            except Exception:
-                continue
-            audit_total += 1
-            status = entry.get("status") or "?"
-            audit_by_status[status] = audit_by_status.get(status, 0) + 1
-            cap = entry.get("capability") or "?"
-            audit_by_capability[cap] = audit_by_capability.get(cap, 0) + 1
-
+    for it in canonical.get("iterations") or []:
+        summary = it.get("summary") or ""
+        iters.append({
+            "i": it.get("iteration"),
+            "final_e2e_status": it.get("final_e2e_status"),
+            "summary": summary[:240] if isinstance(summary, str) else "",
+            "changed_files": list(it.get("changed_files") or []),
+            "patch_hash": it.get("patch_hash"),
+            "attempts": it.get("attempts") or 0,
+        })
     return {
-        "task_id": tm.get("task_id", task_id),
-        "status": tm.get("status"),
-        "final_status": tm.get("final_status"),
-        "stop_reason": tm.get("stop_reason"),
-        "selected_iteration": tm.get("selected_iteration"),
-        "created_at_utc": tm.get("created_at_utc"),
-        "updated_at_utc": tm.get("updated_at_utc"),
-        "duration_seconds": _run_duration_seconds(tm),
-        "goal": tc.get("implementation_goal"),
-        "scenario": tc.get("scenario") or tm.get("scenario"),
+        "task_id": canonical.get("task_id"),
+        "status": canonical.get("status"),
+        "final_status": canonical.get("final_status"),
+        "stop_reason": canonical.get("stop_reason"),
+        "selected_iteration": canonical.get("selected_iteration"),
+        "created_at_utc": canonical.get("created_at_utc"),
+        "updated_at_utc": canonical.get("updated_at_utc"),
+        "duration_seconds": canonical.get("duration_seconds"),
+        "goal": canonical.get("goal"),
+        "scenario": canonical.get("scenario"),
         "iteration_count": len(iters),
         "iterations": iters,
-        "audit": {
-            "total": audit_total,
-            "by_status": audit_by_status,
-            "by_capability": audit_by_capability,
-        },
+        "audit": _runs_audit_rollup(Path(canonical["path"])),
     }
 
 
@@ -1434,56 +1394,12 @@ def _compare_deltas(a: dict[str, Any] | None,
                     b: dict[str, Any] | None) -> dict[str, Any]:
     """High-level summary of what changed from ``a`` to ``b``.
 
-    Pure function over the summary shape so we can keep the analysis
-    server-side (one source of truth) and the client just renders.
-    Every value is either a scalar or a small string so the payload
-    stays a flat dict friendly to React-less DOM building.
+    Delegates to :func:`harness.runs._diff_deltas` so CLI ``runs diff``
+    and the Analyze tab compare view stay in lock-step. Kept as a
+    module-level name because tests and any future surface importing it
+    should not need to know the implementation moved.
     """
-    if a is None or b is None:
-        return {"both_present": False}
-    # Iteration count delta (positive = b took more iterations).
-    di = (b["iteration_count"] or 0) - (a["iteration_count"] or 0)
-    # Duration delta in seconds (positive = b was slower).
-    da_s = a.get("duration_seconds")
-    db_s = b.get("duration_seconds")
-    dur_delta = (
-        (db_s or 0) - (da_s or 0) if (da_s is not None and db_s is not None) else None
-    )
-    # Per-index iteration status agreement.
-    n = min(a["iteration_count"], b["iteration_count"])
-    same_status = sum(
-        1 for i in range(n)
-        if a["iterations"][i]["final_e2e_status"]
-        == b["iterations"][i]["final_e2e_status"]
-    )
-    first_diverge: int | None = None
-    for i in range(n):
-        if (a["iterations"][i]["final_e2e_status"]
-                != b["iterations"][i]["final_e2e_status"]
-            or a["iterations"][i]["patch_hash"]
-                != b["iterations"][i]["patch_hash"]):
-            first_diverge = i + 1
-            break
-    # Files only touched on one side vs both.
-    files_a = {f for it in a["iterations"] for f in it["changed_files"]}
-    files_b = {f for it in b["iterations"] for f in it["changed_files"]}
-    return {
-        "both_present": True,
-        "same_goal": (a.get("goal") or "") == (b.get("goal") or ""),
-        "same_scenario": (a.get("scenario") or "") == (b.get("scenario") or ""),
-        "same_final_status": a.get("final_status") == b.get("final_status"),
-        "iteration_count_delta": di,
-        "duration_seconds_delta": dur_delta,
-        "iteration_status_agreement": same_status,
-        "iteration_status_compared": n,
-        "first_diverging_iteration": first_diverge,
-        "files_only_a": sorted(files_a - files_b),
-        "files_only_b": sorted(files_b - files_a),
-        "files_both": sorted(files_a & files_b),
-        "audit_total_delta": (
-            (b["audit"]["total"] or 0) - (a["audit"]["total"] or 0)
-        ),
-    }
+    return _runs_diff_deltas(a, b)
 
 
 def _trend_bucket_key(goal: str | None) -> str:
