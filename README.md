@@ -56,7 +56,9 @@ scenarios_dir: scenarios
 ```
 
 Every field has a default. Override only what you need. See
-`dev-loop config show` for resolved values.
+`dev-loop config show` for resolved values, or `dev-loop config validate`
+to lint the file (catches typos, out-of-range policy values, and
+unknown providers before they reach the loop).
 
 ## Run ledger
 

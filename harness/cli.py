@@ -5,6 +5,7 @@ Subcommands:
   dev-loop init                           # scaffold .dev-loop/config.yaml
   dev-loop implement --request "..." ...  # run the autonomous loop
   dev-loop config show                    # print the resolved config
+  dev-loop config validate                # lint .dev-loop/config.yaml
   dev-loop schema validate <file> <schema>
   dev-loop replay <scenario>              # one-liner replay
   dev-loop bundle export [--out FILE]     # pack config+scenarios+playbooks
@@ -69,6 +70,14 @@ def main(argv: list[str] | None = None) -> int:
     p_cfg = sub.add_parser("config", help="config inspection")
     cfg_sub = p_cfg.add_subparsers(dest="cfg_cmd", required=True)
     cfg_sub.add_parser("show", help="print resolved configuration")
+    p_cfg_val = cfg_sub.add_parser(
+        "validate",
+        help="lint .dev-loop/config.yaml (typos, type errors, unusual values)",
+    )
+    p_cfg_val.add_argument(
+        "--strict", action="store_true",
+        help="exit non-zero on warnings as well as errors",
+    )
 
     p_schema = sub.add_parser("schema", help="schema utilities")
     sc_sub = p_schema.add_subparsers(dest="sc_cmd", required=True)
@@ -116,10 +125,33 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     repo = args.repo.resolve()
 
+    if args.cmd in ("implement", "replay"):
+        try:
+            _, _, issues = HarnessConfig.load_with_issues(
+                repo_root=repo, explicit_path=args.config,
+            )
+        except (ValueError, OSError) as e:
+            print(f"error: failed to read config: {e}", file=sys.stderr)
+            return 2
+        errors = [i for i in issues if i["level"] == "error"]
+        if errors:
+            print(
+                "error: .dev-loop/config.yaml has errors — "
+                "run `dev-loop config validate` to inspect:",
+                file=sys.stderr,
+            )
+            for it in errors:
+                print(f"  - {it['field']}: {it['message']}", file=sys.stderr)
+            return 2
+
     if args.cmd == "init":
         return _cmd_init(repo, force=args.force, starter=args.starter)
 
     if args.cmd == "config":
+        if args.cfg_cmd == "validate":
+            return _cmd_config_validate(
+                repo, explicit=args.config, strict=args.strict,
+            )
         return _cmd_config_show(repo, explicit=args.config)
 
     if args.cmd == "schema":
@@ -202,8 +234,19 @@ def _cmd_init(repo: Path, *, force: bool, starter: bool = False) -> int:
 
 
 def _cmd_config_show(repo: Path, *, explicit: Path | None) -> int:
-    cfg = HarnessConfig.load(repo_root=repo, explicit_path=explicit)
+    try:
+        cfg, _path, issues = HarnessConfig.load_with_issues(
+            repo_root=repo, explicit_path=explicit,
+        )
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     resolved = cfg.resolved(repo)
+    for it in issues:
+        print(
+            f"{it['level']}: {it['field']}: {it['message']}",
+            file=sys.stderr,
+        )
     info = {
         "repo": str(repo),
         "config_file": str(_first_existing(
@@ -227,6 +270,54 @@ def _cmd_config_show(repo: Path, *, explicit: Path | None) -> int:
         "notes": cfg.notes,
     }
     print(json.dumps(info, indent=2))
+    return 0
+
+
+def _cmd_config_validate(
+    repo: Path, *, explicit: Path | None, strict: bool,
+) -> int:
+    """Lint ``.dev-loop/config.yaml`` and report issues to stdout.
+
+    Exit code: 0 if clean (or only warnings without ``--strict``);
+    1 if any error-level issues are present (or any issues with
+    ``--strict``); 2 if the file can't be read or parsed.
+    """
+    try:
+        _cfg, path, issues = HarnessConfig.load_with_issues(
+            repo_root=repo, explicit_path=explicit,
+        )
+    except (ValueError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    if path is None:
+        print("no config file found — using built-in defaults.")
+        print(f"  expected at: {repo / CONFIG_DIR_NAME / CONFIG_FILE_NAME}")
+        print("  run `dev-loop init` to scaffold one.")
+        return 0
+
+    errors = [i for i in issues if i["level"] == "error"]
+    warnings = [i for i in issues if i["level"] == "warning"]
+    print(f"config: {path}")
+    if not issues:
+        print("  OK — no issues.")
+        return 0
+    for it in errors:
+        print(f"  error   {it['field']}: {it['message']}")
+    for it in warnings:
+        print(f"  warning {it['field']}: {it['message']}")
+    summary_parts = []
+    if errors:
+        summary_parts.append(f"{len(errors)} error{'s' if len(errors) != 1 else ''}")
+    if warnings:
+        summary_parts.append(
+            f"{len(warnings)} warning{'s' if len(warnings) != 1 else ''}"
+        )
+    print(f"  ({', '.join(summary_parts)})")
+    if errors:
+        return 1
+    if strict and warnings:
+        return 1
     return 0
 
 

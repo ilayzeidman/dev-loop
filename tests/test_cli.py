@@ -53,6 +53,77 @@ def test_config_show_emits_json(tmp_path: Path, capsys):
     assert data["default_provider"] == "replay"
 
 
+def test_config_validate_clean(tmp_path: Path, capsys):
+    cli.main(["--repo", str(tmp_path), "init"])
+    capsys.readouterr()
+    rc = cli.main(["--repo", str(tmp_path), "config", "validate"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "OK" in out
+
+
+def test_config_validate_no_file(tmp_path: Path, capsys):
+    rc = cli.main(["--repo", str(tmp_path), "config", "validate"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "no config file" in out.lower()
+
+
+def test_config_validate_flags_errors(tmp_path: Path, capsys):
+    cd = tmp_path / ".dev-loop"
+    cd.mkdir()
+    (cd / "config.yaml").write_text(
+        "policy:\n  max_code_iterations: 0\n"
+    )
+    rc = cli.main(["--repo", str(tmp_path), "config", "validate"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "error" in out.lower()
+    assert "max_code_iterations" in out
+
+
+def test_config_validate_warnings_pass_without_strict(tmp_path: Path, capsys):
+    cd = tmp_path / ".dev-loop"
+    cd.mkdir()
+    (cd / "config.yaml").write_text("totally_unknown_thing: 1\n")
+    rc = cli.main(["--repo", str(tmp_path), "config", "validate"])
+    assert rc == 0
+    rc = cli.main(["--repo", str(tmp_path), "config", "validate", "--strict"])
+    assert rc == 1
+
+
+def test_config_show_surfaces_warnings_on_stderr(tmp_path: Path, capsys):
+    cd = tmp_path / ".dev-loop"
+    cd.mkdir()
+    (cd / "config.yaml").write_text("default_provider: vinyl\n")
+    rc = cli.main(["--repo", str(tmp_path), "config", "show"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["default_provider"] == "vinyl"
+    assert "default_provider" in captured.err
+    assert "warning" in captured.err.lower()
+
+
+def test_implement_aborts_on_config_errors(tmp_path: Path, capsys):
+    """A typo that lands in ``max_code_iterations`` should fail fast with
+    a clear message — not surface as an opaque downstream crash. Users
+    who only run ``dev-loop implement`` should still see config errors."""
+    cd = tmp_path / ".dev-loop"
+    cd.mkdir()
+    (cd / "config.yaml").write_text(
+        "policy:\n  max_code_iterations: 0\n"
+    )
+    rc = cli.main([
+        "--repo", str(tmp_path),
+        "implement", "--request", "anything",
+    ])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "config" in err.lower()
+    assert "max_code_iterations" in err
+
+
 def test_implement_unknown_provider_clean_error(tmp_path: Path, capsys):
     """``--provider unknown`` must produce a friendly error and exit 2,
     not a Python stack trace. End users running ``dev-loop implement``
