@@ -6,6 +6,8 @@ import json
 import socket
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
@@ -1440,3 +1442,152 @@ def test_trends_mount_listed_in_index_doc(tmp_path: Path):
     with _server(tmp_path) as (port, _):
         _, body = _get(port, "/")
         assert 'id="run-trends"' in body
+
+
+# ----- /api/playbooks (per-repo overrides) ---------------------------------
+
+
+def _post_text(port: int, path: str, text: str) -> tuple[int, dict]:
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        method="POST", data=text.encode("utf-8"),
+    )
+    with urllib.request.urlopen(req, timeout=2) as r:
+        return r.status, json.loads(r.read().decode("utf-8"))
+
+
+def test_playbook_list_marks_overridden_and_reports_dir(tmp_path: Path):
+    """The list endpoint tags repo overrides and tells the UI where saves
+    land, so the banner can show an honest path without guessing."""
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/playbooks")
+        assert status == 200
+        data = json.loads(body)
+        assert isinstance(data["playbooks"], list)
+        assert data["playbooks"], "built-in playbooks should be listed"
+        for entry in data["playbooks"]:
+            assert set(entry.keys()) >= {"name", "overridden"}
+            assert entry["overridden"] is False
+        assert data["override_dir"] == ".dev-loop/playbooks"
+
+
+def test_playbook_post_writes_repo_override_not_package(tmp_path: Path):
+    """Saving a playbook lands in ``$REPO/.dev-loop/playbooks/`` — the
+    harness install on disk is never modified by the UI. This is the
+    main user-facing safety guarantee of the Build > Playbooks tab."""
+    from harness.playbooks import PLAYBOOK_DIR
+    name = "implement_feature.v1.md"
+    pristine_pkg = (PLAYBOOK_DIR / name).read_text(encoding="utf-8")
+    try:
+        with _server(tmp_path) as (port, _):
+            status, payload = _post_text(
+                port, f"/api/playbooks/{name}",
+                "# overridden for this repo only\n",
+            )
+            assert status == 200
+            assert payload["ok"] is True
+            written = payload["written"]
+            assert written == f".dev-loop/playbooks/{name}"
+            # The package copy is untouched.
+            assert (PLAYBOOK_DIR / name).read_text(encoding="utf-8") == pristine_pkg
+            # The override file exists on disk in the repo.
+            override = tmp_path / ".dev-loop" / "playbooks" / name
+            assert override.exists()
+            assert override.read_text(encoding="utf-8").startswith(
+                "# overridden for this repo only"
+            )
+            # GET prefers the override on next read.
+            status, body = _get(port, f"/api/playbooks/{name}")
+            assert status == 200
+            assert body.startswith("# overridden for this repo only")
+            # The list now flags the override.
+            _, listing = _get(port, "/api/playbooks")
+            entries = {p["name"]: p["overridden"] for p in json.loads(listing)["playbooks"]}
+            assert entries[name] is True
+    finally:
+        # Defensive: ensure no test ever leaves the package dir mutated.
+        assert (PLAYBOOK_DIR / name).read_text(encoding="utf-8") == pristine_pkg
+
+
+def test_playbook_post_rejects_path_traversal(tmp_path: Path):
+    """``..`` and slashes in the name must be refused so a write can't
+    escape the per-repo override directory."""
+    with _server(tmp_path) as (port, _):
+        for bad in ("../evil.md", "sub/dir.md", ".hidden.md"):
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/playbooks/{urllib.parse.quote(bad, safe='')}",
+                method="POST", data=b"nope",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=2) as r:
+                    status = r.status
+            except urllib.error.HTTPError as e:
+                status = e.code
+            assert status == 403, f"{bad!r} should be 403, got {status}"
+
+
+def test_playbook_resolve_prefers_repo_override(tmp_path: Path):
+    """``load_playbook(name, repo=...)`` reads the repo override first.
+
+    This is the bridge that makes the UI's save take effect for any
+    in-process consumer that knows the repo (the bundle importer, future
+    runners). If this regresses, edits silently no-op."""
+    from harness.playbooks import (
+        load_playbook, resolve_playbook_path, PLAYBOOK_DIR,
+    )
+    name = "implement_feature.v1.md"
+    override_dir = tmp_path / ".dev-loop" / "playbooks"
+    override_dir.mkdir(parents=True)
+    (override_dir / name).write_text("OVERRIDE BODY\n", encoding="utf-8")
+
+    assert resolve_playbook_path(name, repo=tmp_path) == override_dir / name
+    assert load_playbook(name, repo=tmp_path) == "OVERRIDE BODY\n"
+    # Without ``repo``, callers still see the package default.
+    assert load_playbook.cache_clear() is None or True
+    pkg_text = (PLAYBOOK_DIR / name).read_text(encoding="utf-8")
+    assert load_playbook(name) == pkg_text
+
+
+def test_palette_marks_playbook_overrides(tmp_path: Path):
+    """The Cmd+K palette surfaces a clear hint when a playbook is repo-
+    overridden, so users can find their edits without remembering paths."""
+    name = "implement_feature.v1.md"
+    override_dir = tmp_path / ".dev-loop" / "playbooks"
+    override_dir.mkdir(parents=True)
+    (override_dir / name).write_text("edited\n", encoding="utf-8")
+    with _server(tmp_path) as (port, _):
+        _, body = _get(port, "/api/palette")
+        items = json.loads(body)["items"]
+        pb = next(it for it in items if it["kind"] == "playbook" and it["id"] == name)
+        assert "override" in pb["subtitle"]
+
+
+def test_bundle_export_carries_only_repo_overrides(tmp_path: Path):
+    """A bundle exported from this repo includes only repo-local
+    overrides — not every built-in playbook from the package directory.
+    That keeps bundles small and the diff at import time meaningful."""
+    from harness.bundle import build_bundle
+    # No overrides: empty playbooks list.
+    b = build_bundle(tmp_path)
+    assert b["playbooks"] == []
+    # Add one override and re-export.
+    override = tmp_path / ".dev-loop" / "playbooks" / "implement_feature.v1.md"
+    override.parent.mkdir(parents=True)
+    override.write_text("repo-only edit\n", encoding="utf-8")
+    b2 = build_bundle(tmp_path)
+    assert [p["name"] for p in b2["playbooks"]] == ["implement_feature.v1.md"]
+    assert b2["playbooks"][0]["content"] == "repo-only edit\n"
+
+
+def test_readonly_banners_present_in_index_doc(tmp_path: Path):
+    """Capabilities and Schemas are read-only views; the index must ship
+    a banner saying so, with the source path the user should edit."""
+    with _server(tmp_path) as (port, _):
+        _, body = _get(port, "/")
+    assert "Read-only here" in body
+    assert "harness/capabilities/registry.yaml" in body
+    assert "harness/schemas/*.json" in body
+    # Playbooks ship an override banner, not a read-only banner, since
+    # they can be edited — but the edits go to the repo.
+    assert "Saves stay in this repo" in body
+    assert "id=\"pb-override-path\"" in body

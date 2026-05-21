@@ -48,7 +48,7 @@ from .config import (
     CONFIG_FILE_NAME,
     HarnessConfig,
 )
-from .playbooks import PLAYBOOK_DIR
+from .playbooks import PLAYBOOK_DIR, repo_playbook_dir
 from .util import utc_now_iso
 
 BUNDLE_FORMAT = "dev-loop-bundle"
@@ -86,7 +86,7 @@ def build_bundle(repo: Path, *, note: str = "") -> dict[str, Any]:
     config_yaml = cf.read_text(encoding="utf-8") if cf.exists() else ""
 
     scenarios = _dump_scenarios(resolved.scenarios_dir)
-    playbooks = _dump_modified_playbooks()
+    playbooks = _dump_repo_playbook_overrides(repo)
 
     return {
         "format": BUNDLE_FORMAT,
@@ -141,18 +141,18 @@ def _dump_scenarios(scenarios_dir: Path) -> list[dict[str, Any]]:
     return out
 
 
-def _dump_modified_playbooks() -> list[dict[str, Any]]:
-    """Playbooks that have been edited away from the package defaults.
+def _dump_repo_playbook_overrides(repo: Path) -> list[dict[str, Any]]:
+    """Playbooks the repo has overridden under ``.dev-loop/playbooks/``.
 
-    For v1 the playbook directory IS the package directory, so "default"
-    just means "doesn't match the in-process bundled string." We export
-    everything we find that lives in the playbook dir — diffing against a
-    pristine checkout is the importer's job.
+    Only repo-local overrides ship in a bundle. Built-in playbooks live in
+    the harness install and travel with the package; re-exporting them
+    would just bloat every bundle with the same defaults.
     """
     out: list[dict[str, Any]] = []
-    if not PLAYBOOK_DIR.exists():
+    override_dir = repo_playbook_dir(repo)
+    if not override_dir.exists():
         return out
-    for p in sorted(PLAYBOOK_DIR.glob("*.md")):
+    for p in sorted(override_dir.glob("*.md")):
         try:
             out.append({
                 "name": p.name,
@@ -345,10 +345,11 @@ def preview_apply(bundle: dict[str, Any], repo: Path) -> dict[str, Any]:
             ))
 
     # playbooks
+    pb_override_dir = repo_playbook_dir(repo)
     for p in bundle.get("playbooks") or []:
         name = p["name"]
         content = p["content"]
-        dest = PLAYBOOK_DIR / name
+        dest = pb_override_dir / name
         display = f"playbooks/{name}"
         if not dest.exists():
             status = "new"
@@ -477,13 +478,14 @@ def apply_bundle(
             _write(display, dest, content, scenarios_dir.resolve())
 
     # playbooks
+    pb_override_dir = repo_playbook_dir(repo)
     for p in bundle.get("playbooks") or []:
         name = p["name"]
         display = f"playbooks/{name}"
         if not _should_include(display):
             continue
-        dest = (PLAYBOOK_DIR / name).resolve()
-        _write(display, dest, p["content"], PLAYBOOK_DIR.resolve())
+        dest = (pb_override_dir / name).resolve()
+        _write(display, dest, p["content"], pb_override_dir.resolve())
 
     # Bust the playbook cache so the in-process orchestrator sees the
     # imported text on the next call.

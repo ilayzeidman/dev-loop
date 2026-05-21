@@ -462,10 +462,16 @@ async function refreshBuildCapabilities() {
 }
 
 async function refreshBuildPlaybooks() {
-  const {playbooks} = await getJSON("/api/playbooks");
+  const data = await getJSON("/api/playbooks");
+  const playbooks = data.playbooks || [];
+  const overrideDir = data.override_dir || ".dev-loop/playbooks";
+  $("#pb-override-path").textContent = overrideDir + "/";
   const sel = $("#pb-select");
-  sel.innerHTML = playbooks.map(p => `<option value="${p}">${p}</option>`).join("");
-  if (playbooks.length) await loadPlaybook(playbooks[0]);
+  sel.innerHTML = playbooks.map(p => {
+    const tag = p.overridden ? " (overridden)" : "";
+    return `<option value="${p.name}">${p.name}${tag}</option>`;
+  }).join("");
+  if (playbooks.length) await loadPlaybook(playbooks[0].name);
 }
 async function loadPlaybook(name) {
   $("#pb-textarea").value = await getText("/api/playbooks/" + encodeURIComponent(name));
@@ -476,8 +482,11 @@ $("#pb-save").addEventListener("click", async () => {
   const name = $("#pb-select").value;
   $("#pb-status").textContent = "saving…";
   try {
-    await postText("/api/playbooks/" + encodeURIComponent(name), $("#pb-textarea").value);
-    $("#pb-status").textContent = "saved ✓";
+    const res = await postText("/api/playbooks/" + encodeURIComponent(name), $("#pb-textarea").value);
+    const path = (res && res.written) || "";
+    $("#pb-status").textContent = path ? `saved to ${path}` : "saved";
+    await refreshBuildPlaybooks();
+    $("#pb-select").value = name;
   } catch (e) { $("#pb-status").textContent = "error: " + e; }
 });
 

@@ -37,9 +37,10 @@ def test_build_bundle_empty_repo(tmp_path: Path):
     assert b["config"]["present"] is False
     assert b["config"]["yaml"] == ""
     assert b["scenarios"] == []
-    # The package ships playbooks, so this should be non-empty even on a
-    # fresh user repo (they're the harness defaults).
-    assert isinstance(b["playbooks"], list)
+    # Bundles export only repo-local overrides under ``.dev-loop/playbooks/``;
+    # built-in playbooks ship with the harness package so they don't need
+    # to ride along in every bundle.
+    assert b["playbooks"] == []
     # Roundtrips through JSON.
     text = bundle_to_json(b)
     assert json.loads(text) == b

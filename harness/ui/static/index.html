@@ -296,33 +296,55 @@
 
         <div class="panel hidden" id="builder-capabilities">
           <h2>Capabilities</h2>
+          <div class="readonly-banner" role="note">
+            <strong>Read-only here.</strong>
+            Edit <code>harness/capabilities/registry.yaml</code> in source to
+            add or change capabilities. This view shows what the loop will
+            currently see.
+          </div>
           <p class="muted">
             External actions are gated by this registry. <code>agent_requestable</code>
             capabilities can appear in a triage's <code>diagnostic_request</code>.
             <code>forced_params</code> override anything an agent might pass.
           </p>
           <table id="cap-table">
-            <thead><tr><th>Name</th><th>Category</th><th>Agent?</th><th>Timeout</th><th>Forced params</th></tr></thead>
+            <thead><tr><th scope="col">Name</th><th scope="col">Category</th><th scope="col">Agent?</th><th scope="col">Timeout</th><th scope="col">Forced params</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
 
         <div class="panel hidden" id="builder-playbooks">
           <h2>Playbooks</h2>
-          <div class="row">
-            <select id="pb-select"></select>
-            <button id="pb-save">Save</button>
-            <span id="pb-status"></span>
+          <div class="override-banner" role="note">
+            <strong>Saves stay in this repo.</strong>
+            Changes are written to
+            <code id="pb-override-path">.dev-loop/playbooks/</code>
+            and override the built-in copy from the harness install. The
+            installed package directory is never modified.
           </div>
-          <textarea id="pb-textarea" rows="22" spellcheck="false"></textarea>
+          <div class="row">
+            <label for="pb-select" class="sr-only">Playbook</label>
+            <select id="pb-select" aria-label="Playbook"></select>
+            <button id="pb-save">Save</button>
+            <span id="pb-status" role="status" aria-live="polite"></span>
+          </div>
+          <label for="pb-textarea" class="sr-only">Playbook contents</label>
+          <textarea id="pb-textarea" rows="22" spellcheck="false"
+            aria-label="Playbook contents"></textarea>
         </div>
 
         <div class="panel hidden" id="builder-schemas">
           <h2>Schemas</h2>
-          <div class="row">
-            <select id="sch-select"></select>
+          <div class="readonly-banner" role="note">
+            <strong>Read-only here.</strong>
+            Edit JSON Schemas in source under <code>harness/schemas/*.json</code>.
+            They're vendored so the loop can validate without network access.
           </div>
-          <pre id="sch-content"></pre>
+          <div class="row">
+            <label for="sch-select" class="sr-only">Schema</label>
+            <select id="sch-select" aria-label="Schema"></select>
+          </div>
+          <pre id="sch-content" aria-label="Schema JSON"></pre>
         </div>
 
         <div class="panel hidden" id="builder-scenarios">
@@ -584,10 +606,8 @@
               <button id="bundle-copy" class="secondary">Copy JSON</button>
               <span id="bundle-export-status" class="muted"></span>
             </div>
-            <details>
-              <summary class="muted">What's inside?</summary>
-              <ul id="bundle-export-summary" class="muted"></ul>
-            </details>
+            <p class="muted bundle-inside-label">What's inside</p>
+            <ul id="bundle-export-summary" class="muted bundle-inside-list"></ul>
           </section>
 
           <section class="share-section">

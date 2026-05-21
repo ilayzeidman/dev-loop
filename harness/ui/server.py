@@ -37,7 +37,8 @@ Write endpoints
   POST /api/config/validate              dry-run a YAML body (no write)
   POST /api/config/form                  render canonical YAML from a form dict
   POST /api/init                         one-click onboarding (config + starter)
-  POST /api/playbooks/<name>             write playbook (repo-local override)
+  POST /api/playbooks/<name>             write playbook to per-repo override
+                                         ($REPO/.dev-loop/playbooks/<name>)
   POST /api/scenarios/<name>/file/<fn>   write scenario file
   POST /api/scenarios                    create new scenario dir
   POST /api/scenarios/<name>/form        save structured form (writes 4 files)
@@ -82,7 +83,7 @@ from ..config import (
     write_default_config,
     write_starter_scenario,
 )
-from ..playbooks import PLAYBOOK_DIR
+from ..playbooks import PLAYBOOK_DIR, repo_playbook_dir
 from ..schemas import SCHEMA_DIR
 from ..scenarios import (
     default_e2e_result,
@@ -949,35 +950,62 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             self._send_json(200, {"capabilities": specs})
 
         def _api_list_playbooks(self) -> None:
-            files = sorted(p.name for p in PLAYBOOK_DIR.glob("*.md"))
-            self._send_json(200, {"playbooks": files})
+            override_dir = repo_playbook_dir(repo)
+            names: set[str] = set()
+            names.update(p.name for p in PLAYBOOK_DIR.glob("*.md"))
+            if override_dir.exists():
+                names.update(p.name for p in override_dir.glob("*.md"))
+            playbooks = []
+            for name in sorted(names):
+                playbooks.append({
+                    "name": name,
+                    "overridden": (override_dir / name).exists(),
+                })
+            self._send_json(200, {
+                "playbooks": playbooks,
+                "override_dir": str(override_dir.relative_to(repo))
+                                 if override_dir.is_relative_to(repo)
+                                 else str(override_dir),
+            })
 
         def _api_playbook_get(self, name: str) -> None:
-            f = (PLAYBOOK_DIR / name).resolve()
-            try:
-                f.relative_to(PLAYBOOK_DIR.resolve())
-            except ValueError:
+            if "/" in name or "\\" in name or name.startswith("."):
                 self._send_text(403, "forbidden"); return
-            if not f.exists():
-                self._send_text(404, "not found"); return
-            self._send_text(200, f.read_text(encoding="utf-8"), "text/markdown; charset=utf-8")
+            override = repo_playbook_dir(repo) / name
+            pkg = PLAYBOOK_DIR / name
+            for f in (override, pkg):
+                if f.exists():
+                    self._send_text(
+                        200, f.read_text(encoding="utf-8"),
+                        "text/markdown; charset=utf-8",
+                    )
+                    return
+            self._send_text(404, "not found")
 
         def _api_playbook_post(self, name: str, text: str) -> None:
-            # Saved into the harness package dir (the repo where dev-loop
-            # lives). For per-repo overrides users would maintain their own
-            # fork — that's intentional for v1.
-            f = (PLAYBOOK_DIR / name).resolve()
+            # Writes go to the per-repo override at
+            # ``$REPO/.dev-loop/playbooks/<name>``. The installed harness
+            # package directory is never modified by the UI, so edits stay
+            # scoped to this repo. ``load_playbook`` checks the override
+            # first, so in-process agent runs (when passed ``repo=``) see
+            # the new text on the next call.
+            if "/" in name or "\\" in name or name.startswith("."):
+                self._send_text(403, "forbidden"); return
+            override_dir = repo_playbook_dir(repo)
+            override_dir.mkdir(parents=True, exist_ok=True)
+            f = (override_dir / name).resolve()
             try:
-                f.relative_to(PLAYBOOK_DIR.resolve())
+                f.relative_to(override_dir.resolve())
             except ValueError:
                 self._send_text(403, "forbidden"); return
             f.write_text(text, encoding="utf-8")
-            # Bust the in-process ``lru_cache`` on ``load_playbook`` so any
-            # in-process consumer (tests, future in-proc agent runner) sees
-            # the new text on the next call.
             from ..playbooks import load_playbook
             load_playbook.cache_clear()
-            self._send_json(200, {"ok": True})
+            self._send_json(200, {
+                "ok": True,
+                "written": str(f.relative_to(repo))
+                            if f.is_relative_to(repo) else str(f),
+            })
 
         def _api_list_schemas(self) -> None:
             files = sorted(p.name for p in SCHEMA_DIR.glob("*.json"))
@@ -1077,11 +1105,18 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                     })
 
             # 5. Playbooks + schemas (lightweight, just filenames).
-            for p in sorted(PLAYBOOK_DIR.glob("*.md")):
+            pb_names: set[str] = set()
+            pb_names.update(p.name for p in PLAYBOOK_DIR.glob("*.md"))
+            override_pb = repo_playbook_dir(repo)
+            if override_pb.exists():
+                pb_names.update(p.name for p in override_pb.glob("*.md"))
+            for name in sorted(pb_names):
+                overridden = (override_pb / name).exists()
                 items.append({
-                    "kind": "playbook", "id": p.name, "title": p.name,
-                    "subtitle": "playbook", "group": "Playbooks",
-                    "keywords": f"playbook {p.name}",
+                    "kind": "playbook", "id": name, "title": name,
+                    "subtitle": "playbook (repo override)" if overridden else "playbook",
+                    "group": "Playbooks",
+                    "keywords": f"playbook {name}",
                 })
             for p in sorted(SCHEMA_DIR.glob("*.json")):
                 items.append({
