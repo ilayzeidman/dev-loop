@@ -612,6 +612,59 @@ def test_iteration_crash_does_not_leave_ledger_half_written(tmp_path: Path):
     assert "simulated mid-iteration failure" in (iter_manifest.get("error") or "")
 
 
+def test_task_contract_crash_finalizes_ledger(tmp_path: Path):
+    """If the task-contract phase itself raises (provider CLI crashed,
+    SIGINT propagated into the subprocess, OSError on disk) the
+    orchestrator must finalize the ledger the same way an in-iteration
+    crash does: ``task_manifest.json`` ends up with ``final_status``
+    set, ``final_review_report.json`` exists, and ``runs ls`` would
+    classify the run as ``failed_inconclusive`` instead of leaving it
+    stuck in ``initialized`` for ``effective_status`` to surface as
+    ``aborted``.
+    """
+    from harness.agents.base import AgentPhase, AgentRunner
+
+    class _ContractCrashingRunner(AgentRunner):
+        provider_name = "crash_contract"
+        def profile(self):
+            return {"provider": "crash_contract"}
+        def run_phase(self, phase, *, workspace_path, task_contract,
+                      run_manifest, input_bundle, output_schema_name,
+                      budget_seconds):
+            if phase is AgentPhase.TASK_CONTRACT:
+                raise RuntimeError("simulated contract-phase crash")
+            raise AssertionError(f"unexpected phase {phase}")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed_repo(repo)
+    registry = load_default_registry()
+    cfg = OrchestratorConfig(
+        repo_root=repo,
+        runs_dir=tmp_path / "runs",
+        sandbox_dir=tmp_path / "sb",
+        clean_workspace_dir=tmp_path / "clean",
+        request="contract crash test",
+        provider="crash_contract",
+        policy=LoopPolicy(max_code_iterations=1),
+    )
+    orch = Orchestrator(
+        config=cfg, runner=_ContractCrashingRunner(), registry=registry,
+    )
+    # This must NOT raise.
+    result = orch.run()
+    assert result.final_status == "failed_inconclusive"
+    assert (result.ledger_dir / "final_review_report.json").exists()
+    tm = read_json(result.ledger_dir / "task_manifest.json")
+    assert tm.get("final_status") == "failed_inconclusive"
+    assert "simulated contract-phase crash" in (tm.get("error") or "")
+    # And runs.py's reader buckets it cleanly (no ghost row).
+    from harness import runs as runs_mod
+    listing = runs_mod.list_runs(tmp_path / "runs")
+    assert len(listing) == 1
+    assert listing[0]["effective_status"] == "failed_inconclusive"
+
+
 def test_replay_run_same_failure_twice_hits_stop_condition(tmp_path: Path):
     """When the same E2E failure repeats, the loop should stop with
     failed_stop_condition rather than falling through to inconclusive."""

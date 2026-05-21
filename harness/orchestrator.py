@@ -78,16 +78,38 @@ class Orchestrator:
         self.registry.set_audit_sink(audit_to_jsonl(ledger.root / "capability_audit.jsonl"))
 
         # Phase: task contract ------------------------------------------
+        # The contract phase shells out to the provider just like every
+        # other agent phase; any crash here (CLI exited non-zero, SIGINT
+        # propagated to the subprocess, OSError on disk) must finalize the
+        # ledger cleanly instead of leaving it stuck in ``initialized``
+        # with no ``final_status`` — otherwise ``runs ls`` shows a ghost
+        # row that never resolves.
         contract_input = {"original_request": self.cfg.request}
-        contract_res = self.runner.run_phase(
-            AgentPhase.TASK_CONTRACT,
-            workspace_path=self.cfg.repo_root,
-            task_contract=None,
-            run_manifest=None,
-            input_bundle=contract_input,
-            output_schema_name="task_contract.v1.json",
-            budget_seconds=300,
-        )
+        try:
+            contract_res = self.runner.run_phase(
+                AgentPhase.TASK_CONTRACT,
+                workspace_path=self.cfg.repo_root,
+                task_contract=None,
+                run_manifest=None,
+                input_bundle=contract_input,
+                output_schema_name="task_contract.v1.json",
+                budget_seconds=300,
+            )
+        except Exception as e:
+            reason = f"task_contract phase crashed: {type(e).__name__}: {e}"
+            ledger.update_task_manifest(
+                status="aborted",
+                final_status="failed_inconclusive",
+                error=reason,
+            )
+            return self._finalize_failure(
+                ledger=ledger,
+                final_status="failed_inconclusive",
+                contract=None,
+                iteration_records=[],
+                selected_iteration=None,
+                base_sha=base_sha,
+            )
         try:
             schemas.validate("task_contract.v1.json", contract_res.output)
         except Exception as e:

@@ -664,7 +664,8 @@ def _cmd_runs_ls(
     for r in runs:
         rows.append((
             r["task_id"],
-            r.get("final_status") or r.get("status") or "-",
+            r.get("effective_status")
+                or r.get("final_status") or r.get("status") or "-",
             str(r.get("iterations") or 0),
             str(r.get("selected_iteration") if r.get("selected_iteration") is not None else "-"),
             _fmt_duration(r.get("duration_seconds")),
@@ -735,6 +736,9 @@ def _cmd_runs_show(
     print(f"task_id:       {detail['task_id']}")
     print(f"final_status:  {detail.get('final_status') or '-'}")
     print(f"status:        {detail.get('status') or '-'}")
+    eff = detail.get("effective_status")
+    if eff and not detail.get("final_status"):
+        print(f"effective:     {eff}")
     if detail.get("stop_reason"):
         print(f"stop_reason:   {detail['stop_reason']}")
     sel = detail.get("selected_iteration")

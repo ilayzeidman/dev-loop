@@ -75,6 +75,71 @@ def _write_run(
     return root
 
 
+def test_effective_status_uses_final_status_when_present():
+    assert runs.effective_status({"final_status": "passed"}) == "passed"
+    assert runs.effective_status({
+        "final_status": "failed_inconclusive",
+        "status": "aborted",
+    }) == "failed_inconclusive"
+
+
+def test_effective_status_buckets_midflight_as_aborted():
+    """A run interrupted between ``TaskLedger.create`` and the final
+    report writer has ``status`` set to one of the live-flight values
+    (``initialized``, ``contract_ready``, ``stopped``) but no
+    ``final_status``. Surfacing that as ``aborted`` is what lets
+    ``runs ls`` show a ghost run as something other than ``-``."""
+    assert runs.effective_status({"status": "initialized"}) == "aborted"
+    assert runs.effective_status({"status": "contract_ready"}) == "aborted"
+    assert runs.effective_status({"status": "stopped"}) == "aborted"
+
+
+def test_effective_status_passes_through_other_statuses():
+    """Statuses the orchestrator explicitly writes as terminal but that
+    aren't a ``final_status`` (e.g. legacy or new lifecycle values) flow
+    through unchanged so the surface keeps showing whatever the
+    orchestrator most recently committed."""
+    assert runs.effective_status({"status": "completed"}) == "completed"
+    assert runs.effective_status({"status": "awaiting_human"}) == "awaiting_human"
+
+
+def test_effective_status_unknown_when_status_missing():
+    assert runs.effective_status({}) == "unknown"
+    assert runs.effective_status({"status": None}) == "unknown"
+
+
+def test_summarize_run_dir_includes_effective_status(tmp_path: Path):
+    """The listing entry must carry ``effective_status`` so the CLI and
+    UI render aborted runs without recomputing the bucket themselves."""
+    bad = tmp_path / "20260520-120000-aborted"
+    (bad / "iterations").mkdir(parents=True)
+    (bad / "task_manifest.json").write_text(json.dumps({
+        "task_id": "20260520-120000-aborted",
+        "status": "contract_ready",
+        "created_at_utc": "2026-05-21T10:00:00Z",
+        "updated_at_utc": "2026-05-21T10:00:05Z",
+    }))
+    listing = runs.list_runs(tmp_path)
+    assert len(listing) == 1
+    assert listing[0]["effective_status"] == "aborted"
+    assert listing[0]["final_status"] is None
+
+
+def test_show_run_includes_effective_status_for_aborted(tmp_path: Path):
+    bad = tmp_path / "20260520-120000-aborted"
+    (bad / "iterations").mkdir(parents=True)
+    (bad / "task_manifest.json").write_text(json.dumps({
+        "task_id": "20260520-120000-aborted",
+        "status": "initialized",
+        "created_at_utc": "2026-05-21T10:00:00Z",
+        "updated_at_utc": "2026-05-21T10:00:00Z",
+    }))
+    detail = runs.show_run(tmp_path, "20260520-120000-aborted")
+    assert detail is not None
+    assert detail["effective_status"] == "aborted"
+    assert detail["final_status"] is None
+
+
 def test_run_duration_seconds_basic():
     tm = {
         "created_at_utc": "2026-05-21T10:00:00Z",

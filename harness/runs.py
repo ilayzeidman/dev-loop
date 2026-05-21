@@ -48,6 +48,48 @@ def run_duration_seconds(manifest: dict[str, Any]) -> int | None:
     return max(0, int((b - a).total_seconds()))
 
 
+# Lifecycle states the orchestrator writes to ``task_manifest.status``. A
+# run is "in flight" until ``status == 'completed'`` (or one of the
+# pre-completion terminal states the orchestrator explicitly sets).
+_LIVE_STATUSES = frozenset({
+    "initialized", "contract_ready", "stopped",
+})
+
+
+def effective_status(manifest: dict[str, Any]) -> str:
+    """Stable bucket for ``runs ls`` display.
+
+    A run can crash (SIGINT to the provider CLI, host OOM, kernel kill)
+    between writing ``task_manifest.json`` and finalizing it. The ledger
+    then has ``status`` set to a mid-flight value (``contract_ready``,
+    ``initialized``) with no ``final_status``. The original behaviour
+    rendered that as ``-`` in the table, indistinguishable from a run
+    that's currently executing.
+
+    This helper collapses both surfaces into one bucket so the CLI and UI
+    can decide what to render:
+
+      * ``final_status`` wins when present (the run reached the report
+        writer).
+      * Otherwise ``aborted`` for a mid-flight status (the process died
+        before the loop finished).
+      * Otherwise the raw ``status`` (e.g. ``stopped``).
+      * ``unknown`` when even ``status`` is missing.
+
+    Pure — no I/O — so the helper can be unit-tested directly and reused
+    from both ``harness.runs`` consumers and the UI's listing payload.
+    """
+    fs = manifest.get("final_status")
+    if isinstance(fs, str) and fs:
+        return fs
+    st = manifest.get("status")
+    if isinstance(st, str) and st in _LIVE_STATUSES:
+        return "aborted"
+    if isinstance(st, str) and st:
+        return st
+    return "unknown"
+
+
 def count_iterations(run_dir: Path) -> int:
     """Count iteration directories under ``<run>/iterations/``."""
     iters = run_dir / "iterations"
@@ -90,6 +132,7 @@ def _summarize_run_dir(d: Path) -> dict[str, Any] | None:
         "task_id": data.get("task_id", d.name),
         "status": data.get("status"),
         "final_status": data.get("final_status"),
+        "effective_status": effective_status(data),
         "selected_iteration": data.get("selected_iteration"),
         "created_at_utc": data.get("created_at_utc"),
         "updated_at_utc": data.get("updated_at_utc"),
@@ -319,6 +362,7 @@ def show_run(runs_dir: Path, task_id: str) -> dict[str, Any] | None:
         "task_id": tm.get("task_id", task_id),
         "status": tm.get("status"),
         "final_status": tm.get("final_status"),
+        "effective_status": effective_status(tm),
         "selected_iteration": tm.get("selected_iteration"),
         "stop_reason": tm.get("stop_reason"),
         "created_at_utc": tm.get("created_at_utc"),
