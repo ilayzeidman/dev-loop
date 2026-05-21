@@ -717,6 +717,7 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                     "status": entry.get("status"),
                     "final_status": entry.get("final_status"),
                     "effective_status": entry.get("effective_status"),
+                    "interrupted": bool(entry.get("interrupted")),
                     "selected_iteration": entry.get("selected_iteration"),
                     "created_at_utc": entry.get("created_at_utc"),
                     "updated_at_utc": entry.get("updated_at_utc"),

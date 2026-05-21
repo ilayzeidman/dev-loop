@@ -140,6 +140,53 @@ def test_show_run_includes_effective_status_for_aborted(tmp_path: Path):
     assert detail["final_status"] is None
 
 
+def test_summarize_and_show_surface_interrupted_marker(tmp_path: Path):
+    """The orchestrator records ``interrupted: true`` on the task
+    manifest when a SIGINT is caught and the ledger is finalized. The
+    listing entry and the ``show_run`` payload must both surface that
+    field so callers (CLI ``runs ls``/``runs show``, ``/api/runs``,
+    Analyze tab) can distinguish a Ctrl-C run from a regular
+    ``failed_inconclusive`` without re-reading the manifest.
+    """
+    rd = tmp_path / "20260520-120000-irq"
+    (rd / "iterations").mkdir(parents=True)
+    (rd / "task_manifest.json").write_text(json.dumps({
+        "task_id": "20260520-120000-irq",
+        "status": "aborted",
+        "final_status": "failed_inconclusive",
+        "interrupted": True,
+        "created_at_utc": "2026-05-21T10:00:00Z",
+        "updated_at_utc": "2026-05-21T10:00:01Z",
+    }))
+    listing = runs.list_runs(tmp_path)
+    assert len(listing) == 1
+    assert listing[0]["interrupted"] is True
+    assert listing[0]["effective_status"] == "failed_inconclusive"
+    detail = runs.show_run(tmp_path, "20260520-120000-irq")
+    assert detail is not None
+    assert detail["interrupted"] is True
+
+
+def test_summarize_defaults_interrupted_to_false_when_absent(tmp_path: Path):
+    """Backward-compat: runs predating the ``interrupted`` field must
+    surface ``interrupted: False`` (a stable boolean) so consumers can
+    rely on the key being present."""
+    rd = tmp_path / "20260520-110000-old"
+    (rd / "iterations").mkdir(parents=True)
+    (rd / "task_manifest.json").write_text(json.dumps({
+        "task_id": "20260520-110000-old",
+        "status": "completed",
+        "final_status": "passed",
+        "created_at_utc": "2026-05-21T10:00:00Z",
+        "updated_at_utc": "2026-05-21T10:00:30Z",
+    }))
+    listing = runs.list_runs(tmp_path)
+    assert listing[0]["interrupted"] is False
+    detail = runs.show_run(tmp_path, "20260520-110000-old")
+    assert detail is not None
+    assert detail["interrupted"] is False
+
+
 def test_run_duration_seconds_basic():
     tm = {
         "created_at_utc": "2026-05-21T10:00:00Z",

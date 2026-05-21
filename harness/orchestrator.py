@@ -84,6 +84,15 @@ class Orchestrator:
         # ledger cleanly instead of leaving it stuck in ``initialized``
         # with no ``final_status`` — otherwise ``runs ls`` shows a ghost
         # row that never resolves.
+        #
+        # ``KeyboardInterrupt`` is treated the same way: a SIGINT delivered
+        # to the harness process (Ctrl-C in the terminal, ``runs ls``
+        # against a long-running ``implement``) is *not* an ``Exception``,
+        # so without the explicit branch below the partial ledger would
+        # leak past iter-18's handler. We finalize as ``failed_inconclusive``
+        # with ``interrupted: true`` recorded on the task manifest, then
+        # re-raise so the CLI still exits with the conventional SIGINT
+        # behaviour instead of pretending the run completed.
         contract_input = {"original_request": self.cfg.request}
         try:
             contract_res = self.runner.run_phase(
@@ -95,6 +104,22 @@ class Orchestrator:
                 output_schema_name="task_contract.v1.json",
                 budget_seconds=300,
             )
+        except KeyboardInterrupt:
+            ledger.update_task_manifest(
+                status="aborted",
+                final_status="failed_inconclusive",
+                interrupted=True,
+                error="task_contract phase interrupted by SIGINT",
+            )
+            self._finalize_failure(
+                ledger=ledger,
+                final_status="failed_inconclusive",
+                contract=None,
+                iteration_records=[],
+                selected_iteration=None,
+                base_sha=base_sha,
+            )
+            raise
         except Exception as e:
             reason = f"task_contract phase crashed: {type(e).__name__}: {e}"
             ledger.update_task_manifest(
@@ -172,6 +197,48 @@ class Orchestrator:
                     prev_failure_dossier=prev_failure_dossier,
                     prev_iteration_summary=prev_iteration_summary,
                 )
+            except KeyboardInterrupt:
+                # SIGINT mid-iteration: write a synthesized iteration
+                # manifest and final report so the ledger is durable, mark
+                # the task manifest ``interrupted``, then re-raise.
+                reason = f"iteration {iteration} interrupted by SIGINT"
+                try:
+                    ledger.write_iteration_manifest(iteration, {
+                        "task_id": ledger.task_id,
+                        "iteration": iteration,
+                        "code": {
+                            "base_sha": base_sha,
+                            "patch_hash": None,
+                            "changed_files": [],
+                            "claim_mismatches": {},
+                        },
+                        "agent_output": None,
+                        "attempts": [],
+                        "final_e2e_status": "failed",
+                        "error": reason,
+                        "interrupted": True,
+                    })
+                except Exception:
+                    pass
+                iter_record = _failed_iteration_record(
+                    iteration=iteration, reason=reason,
+                )
+                iteration_records.append(iter_record)
+                ledger.update_task_manifest(
+                    status="aborted",
+                    final_status="failed_inconclusive",
+                    interrupted=True,
+                    error=reason,
+                )
+                self._finalize_failure(
+                    ledger=ledger,
+                    final_status="failed_inconclusive",
+                    contract=contract,
+                    iteration_records=iteration_records,
+                    selected_iteration=None,
+                    base_sha=base_sha,
+                )
+                raise
             except Exception as e:
                 # An unexpected failure inside the iteration (sandbox prep
                 # blew up, the runner crashed, disk full, etc.) must not

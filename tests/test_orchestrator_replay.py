@@ -703,3 +703,223 @@ def test_replay_run_same_failure_twice_hits_stop_condition(tmp_path: Path):
     assert result.final_status == "failed_stop_condition", result.final_status
     tm = read_json(result.ledger_dir / "task_manifest.json")
     assert tm.get("stop_reason") == "same_failure_fingerprint_after_2_code_iterations"
+
+
+def test_sigint_during_task_contract_finalizes_ledger_and_propagates(tmp_path: Path):
+    """SIGINT raises ``KeyboardInterrupt`` — a ``BaseException``, not an
+    ``Exception``. Iter 18's crash handler only catches ``Exception`` so
+    without an explicit branch the partial ledger would leak (no final
+    report, ``status='initialized'``). Pin the contract: the orchestrator
+    finalizes the ledger as ``failed_inconclusive`` *and* re-raises so
+    the CLI can exit with the conventional 130 code.
+    """
+    from harness.agents.base import AgentPhase, AgentRunner
+
+    class _SigintRunner(AgentRunner):
+        provider_name = "sigint_runner"
+        def profile(self):
+            return {"provider": "sigint_runner"}
+        def run_phase(self, phase, *, workspace_path, task_contract,
+                      run_manifest, input_bundle, output_schema_name,
+                      budget_seconds):
+            if phase is AgentPhase.TASK_CONTRACT:
+                raise KeyboardInterrupt()
+            raise AssertionError(f"unexpected phase {phase}")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed_repo(repo)
+    registry = load_default_registry()
+    cfg = OrchestratorConfig(
+        repo_root=repo,
+        runs_dir=tmp_path / "runs",
+        sandbox_dir=tmp_path / "sb",
+        clean_workspace_dir=tmp_path / "clean",
+        request="ctrl-c during contract",
+        provider="sigint_runner",
+        policy=LoopPolicy(max_code_iterations=1),
+    )
+    orch = Orchestrator(config=cfg, runner=_SigintRunner(), registry=registry)
+
+    raised = False
+    try:
+        orch.run()
+    except KeyboardInterrupt:
+        raised = True
+    assert raised, "KeyboardInterrupt must propagate to the caller"
+
+    runs_dir = tmp_path / "runs"
+    run_dirs = [d for d in runs_dir.iterdir() if d.is_dir()]
+    assert len(run_dirs) == 1
+    run_dir = run_dirs[0]
+    assert (run_dir / "final_review_report.json").exists()
+    tm = read_json(run_dir / "task_manifest.json")
+    assert tm["final_status"] == "failed_inconclusive"
+    assert tm.get("interrupted") is True
+    assert "SIGINT" in (tm.get("error") or "")
+
+    from harness import runs as runs_mod
+    listing = runs_mod.list_runs(runs_dir)
+    assert len(listing) == 1
+    assert listing[0]["effective_status"] == "failed_inconclusive"
+    assert listing[0]["interrupted"] is True
+
+
+def test_sigint_mid_iteration_finalizes_ledger_and_propagates(tmp_path: Path):
+    """Same contract as above but with the interrupt landing inside
+    ``_run_iteration`` (after a valid task contract was produced).
+    The iteration manifest must be persisted with ``interrupted: true``
+    and the final review report must exist.
+    """
+    from harness.agents.base import AgentPhase, AgentPhaseResult, AgentRunner
+
+    class _IterSigintRunner(AgentRunner):
+        provider_name = "iter_sigint_runner"
+        def profile(self):
+            return {"provider": "iter_sigint_runner"}
+        def run_phase(self, phase, *, workspace_path, task_contract,
+                      run_manifest, input_bundle, output_schema_name,
+                      budget_seconds):
+            if phase is AgentPhase.TASK_CONTRACT:
+                return AgentPhaseResult(output={
+                    "type": "task_contract",
+                    "implementation_goal": "x",
+                    "assumptions": [], "success_criteria": ["e2e passes"],
+                    "non_goals": [], "likely_components": [],
+                    "validation_plan": [], "ambiguities": [],
+                    "can_start_without_human": True,
+                }, raw_log="")
+            raise KeyboardInterrupt()
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed_repo(repo)
+    registry = load_default_registry()
+    cfg = OrchestratorConfig(
+        repo_root=repo,
+        runs_dir=tmp_path / "runs",
+        sandbox_dir=tmp_path / "sb",
+        clean_workspace_dir=tmp_path / "clean",
+        request="ctrl-c mid-iteration",
+        provider="iter_sigint_runner",
+        policy=LoopPolicy(max_code_iterations=2),
+    )
+    orch = Orchestrator(
+        config=cfg, runner=_IterSigintRunner(), registry=registry,
+    )
+
+    raised = False
+    try:
+        orch.run()
+    except KeyboardInterrupt:
+        raised = True
+    assert raised, "KeyboardInterrupt must propagate to the caller"
+
+    runs_dir = tmp_path / "runs"
+    run_dirs = [d for d in runs_dir.iterdir() if d.is_dir()]
+    assert len(run_dirs) == 1
+    run_dir = run_dirs[0]
+    assert (run_dir / "final_review_report.json").exists()
+    tm = read_json(run_dir / "task_manifest.json")
+    assert tm["final_status"] == "failed_inconclusive"
+    assert tm.get("interrupted") is True
+
+    iter_manifest = read_json(
+        run_dir / "iterations" / "iter-001" / "manifest.json"
+    )
+    assert iter_manifest.get("interrupted") is True
+    assert "SIGINT" in (iter_manifest.get("error") or "")
+
+
+def test_sigint_to_orchestrator_subprocess_finalizes_ledger(tmp_path: Path):
+    """End-to-end SIGINT test: launch the orchestrator in a child Python
+    process, send it ``SIGINT`` while the task-contract phase is blocked
+    in a sleep, then assert the on-disk ledger is finalized.
+
+    This pins the "real Ctrl-C" path in a way the in-process raise-based
+    tests can't: a SIGINT delivered to the OS process triggers the
+    interpreter's signal handler -> ``KeyboardInterrupt`` propagation
+    flow inside the runner, which is what users actually hit when they
+    press Ctrl-C in the terminal.
+    """
+    import signal
+    import sys
+    import time
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed_repo(repo)
+    runs_dir = tmp_path / "runs"
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script = tmp_path / "drive.py"
+    script.write_text(
+        "import sys, time\n"
+        f"sys.path.insert(0, {str(repo_root)!r})\n"
+        "from pathlib import Path\n"
+        "from harness.agents.base import AgentPhase, AgentRunner\n"
+        "from harness.capabilities import load_default_registry\n"
+        "from harness.orchestrator import Orchestrator, OrchestratorConfig\n"
+        "from harness.policy import LoopPolicy\n"
+        "\n"
+        "class SleepRunner(AgentRunner):\n"
+        "    provider_name = 'sleep'\n"
+        "    def profile(self):\n"
+        "        return {'provider': 'sleep'}\n"
+        "    def run_phase(self, phase, **kw):\n"
+        "        time.sleep(60)\n"
+        "        raise AssertionError('should have been interrupted')\n"
+        "\n"
+        f"cfg = OrchestratorConfig(repo_root=Path({str(repo)!r}),\n"
+        f"    runs_dir=Path({str(runs_dir)!r}),\n"
+        f"    sandbox_dir=Path({str(tmp_path / 'sb')!r}),\n"
+        f"    clean_workspace_dir=Path({str(tmp_path / 'clean')!r}),\n"
+        "    request='sigint subprocess test', provider='sleep',\n"
+        "    policy=LoopPolicy(max_code_iterations=1))\n"
+        "orch = Orchestrator(config=cfg, runner=SleepRunner(),\n"
+        "    registry=load_default_registry())\n"
+        "print('READY', flush=True)\n"
+        "try:\n"
+        "    orch.run()\n"
+        "except KeyboardInterrupt:\n"
+        "    print('INTERRUPTED', flush=True)\n"
+        "    sys.exit(130)\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        # Wait for the child to reach the sleep — the "READY" sentinel
+        # is printed *after* the orchestrator is constructed and just
+        # before the run starts, so a follow-up small sleep gives the
+        # task-contract phase a chance to actually enter time.sleep.
+        ready_line = proc.stdout.readline()
+        assert ready_line.strip() == "READY", ready_line
+        time.sleep(0.5)
+        proc.send_signal(signal.SIGINT)
+        stdout, stderr = proc.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
+
+    assert proc.returncode == 130, (proc.returncode, stdout, stderr)
+    assert "INTERRUPTED" in stdout, (stdout, stderr)
+
+    run_dirs = [d for d in runs_dir.iterdir() if d.is_dir()]
+    assert len(run_dirs) == 1, run_dirs
+    run_dir = run_dirs[0]
+    assert (run_dir / "final_review_report.json").exists()
+    tm = read_json(run_dir / "task_manifest.json")
+    assert tm["final_status"] == "failed_inconclusive"
+    assert tm.get("interrupted") is True
+
+    from harness import runs as runs_mod
+    listing = runs_mod.list_runs(runs_dir)
+    assert len(listing) == 1
+    entry = listing[0]
+    assert entry["effective_status"] == "failed_inconclusive"
+    assert entry["interrupted"] is True

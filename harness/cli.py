@@ -662,10 +662,15 @@ def _cmd_runs_ls(
     headers = ("TASK_ID", "STATUS", "ITERS", "SEL", "DURATION", "GOAL")
     rows = [headers]
     for r in runs:
+        status_cell = (
+            r.get("effective_status")
+            or r.get("final_status") or r.get("status") or "-"
+        )
+        if r.get("interrupted"):
+            status_cell = f"{status_cell} (interrupted)"
         rows.append((
             r["task_id"],
-            r.get("effective_status")
-                or r.get("final_status") or r.get("status") or "-",
+            status_cell,
             str(r.get("iterations") or 0),
             str(r.get("selected_iteration") if r.get("selected_iteration") is not None else "-"),
             _fmt_duration(r.get("duration_seconds")),
@@ -739,6 +744,8 @@ def _cmd_runs_show(
     eff = detail.get("effective_status")
     if eff and not detail.get("final_status"):
         print(f"effective:     {eff}")
+    if detail.get("interrupted"):
+        print("interrupted:   yes (SIGINT during run; ledger finalized)")
     if detail.get("stop_reason"):
         print(f"stop_reason:   {detail['stop_reason']}")
     sel = detail.get("selected_iteration")
@@ -1407,7 +1414,19 @@ def _cmd_implement(
         policy=policy,
     )
     orch = Orchestrator(config=config, runner=runner, registry=registry)
-    result = orch.run()
+    try:
+        result = orch.run()
+    except KeyboardInterrupt:
+        # The orchestrator has already finalized the partial ledger (see
+        # the ``KeyboardInterrupt`` branches in orchestrator.run); surface
+        # that to the user with a stable exit code instead of dumping the
+        # traceback or pretending the run finished cleanly.
+        print(
+            "\ninterrupted: partial ledger finalized as failed_inconclusive "
+            "(see `dev-loop runs ls`)",
+            file=sys.stderr,
+        )
+        return 130
 
     print(f"task_id:           {result.task_id}")
     print(f"final_status:      {result.final_status}")
