@@ -215,6 +215,58 @@ def test_replay_run_records_iteration_manifest_when_impl_invalid(tmp_path: Path)
     assert impl_calls, list(ai_calls_dir.iterdir())
 
 
+def test_replay_run_records_actual_agent_triage_even_when_invalid(tmp_path: Path):
+    """When the agent's triage output fails schema validation, the AI-call
+    log must preserve what the agent *actually* said, not the harness's
+    synthesized fallback. The fallback must also appear in the log, clearly
+    labelled, so reviewers can tell which decisions came from the harness
+    vs the agent (design §20)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed_repo(repo)
+    scenario = tmp_path / "failing_scenario"
+    _make_failing_scenario(scenario)
+    # Replace the triage output with something that fails the schema
+    # (missing required ``next_action``).
+    (scenario / "failure_triage.json").write_text(json.dumps({
+        "type": "failure_triage",
+        "failure_class": "code_suspected",
+        # ``next_action``, ``confidence``, etc. missing on purpose.
+    }, indent=2), encoding="utf-8")
+    runner = create_runner("replay", replay_scenario=scenario)
+    registry = load_default_registry()
+    cfg = OrchestratorConfig(
+        repo_root=repo,
+        runs_dir=tmp_path / "runs",
+        sandbox_dir=tmp_path / "sb",
+        clean_workspace_dir=tmp_path / "clean",
+        request="invalid triage path",
+        provider="replay",
+        replay_scenario=scenario,
+        policy=LoopPolicy(max_code_iterations=1),
+    )
+    orch = Orchestrator(config=cfg, runner=runner, registry=registry)
+    result = orch.run()
+    # The AI call directory for iter-001 must contain BOTH the original
+    # (invalid) agent output AND the harness fallback record.
+    ai_calls_dir = result.ledger_dir / "iterations" / "iter-001" / "ai_calls"
+    triage_dirs = sorted(d.name for d in ai_calls_dir.iterdir() if "triage" in d.name)
+    # one for the agent, one for the harness fallback
+    agent_dirs = [d for d in triage_dirs if "harness_fallback" not in d]
+    fallback_dirs = [d for d in triage_dirs if "harness_fallback" in d]
+    assert agent_dirs, triage_dirs
+    assert fallback_dirs, triage_dirs
+    agent_output = read_json(ai_calls_dir / agent_dirs[0] / "output.json")
+    # The recorded agent output is what the agent actually produced
+    # (missing ``next_action``), not the synthesized object.
+    assert "next_action" not in agent_output, agent_output
+    fallback_output = read_json(ai_calls_dir / fallback_dirs[0] / "output.json")
+    assert fallback_output["next_action"] == "stop_inconclusive"
+    # The fallback's input must explain why the fallback was used.
+    fallback_input = read_json(ai_calls_dir / fallback_dirs[0] / "input.json")
+    assert "validation_error" in fallback_input
+
+
 def test_replay_run_same_failure_twice_hits_stop_condition(tmp_path: Path):
     """When the same E2E failure repeats, the loop should stop with
     failed_stop_condition rather than falling through to inconclusive."""

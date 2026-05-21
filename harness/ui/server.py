@@ -34,6 +34,7 @@ Write endpoints
 
 from __future__ import annotations
 
+import copy
 import json
 import shutil
 import subprocess
@@ -123,12 +124,18 @@ class _JobRegistry:
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
-            return self._jobs.get(job_id)
+            j = self._jobs.get(job_id)
+            # Return a deep copy under the lock so the caller can serialize
+            # the snapshot without racing with concurrent ``append_log`` or
+            # ``update`` mutations. The ``log`` string is itself immutable,
+            # but the surrounding dict and the nested ``request`` dict are
+            # shared.
+            return copy.deepcopy(j) if j is not None else None
 
     def list(self) -> list[dict[str, Any]]:
         with self._lock:
             return [
-                {k: v for k, v in j.items() if k != "log"}
+                {k: copy.deepcopy(v) for k, v in j.items() if k != "log"}
                 for j in self._jobs.values()
             ]
 
@@ -390,7 +397,14 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             sc_dir = r.scenarios_dir
             parts = sub.split("/", 2)
             name = parts[0]
+            if not _valid_scenario_name(name):
+                self._send_json(404, {"error": "scenario not found"}); return
             d = sc_dir / name
+            # Belt-and-braces: a clever name (or symlink) could still let
+            # ``d`` resolve outside ``sc_dir``. Guard against that explicitly
+            # so the per-file traversal check below cannot be bypassed.
+            if not _is_within(d, sc_dir):
+                self._send_text(403, "forbidden"); return
             if not d.exists() or not d.is_dir():
                 self._send_json(404, {"error": "scenario not found"}); return
             if len(parts) == 1:
@@ -403,9 +417,7 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 self._send_json(200, {"name": name, "path": str(d), "files": files}); return
             if parts[1] == "file" and len(parts) == 3:
                 f = (d / parts[2]).resolve()
-                try:
-                    f.relative_to(d.resolve())
-                except ValueError:
+                if not _is_within(f, sc_dir):
                     self._send_text(403, "forbidden"); return
                 if not f.exists() or not f.is_file():
                     self._send_text(404, "not found"); return
@@ -420,24 +432,33 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             if len(parts) < 3 or parts[1] != "file":
                 self._send_text(404, "not found"); return
             name = parts[0]
+            if not _valid_scenario_name(name):
+                self._send_json(400, {"error": "invalid scenario name"}); return
             d = sc_dir / name
+            if not _is_within(d, sc_dir):
+                self._send_text(403, "forbidden"); return
             d.mkdir(parents=True, exist_ok=True)
             f = (d / parts[2]).resolve()
-            try:
-                f.relative_to(d.resolve())
-            except ValueError:
+            # Use ``sc_dir`` as the boundary (not ``d``) so a malicious
+            # ``name`` that already escaped can't be used to anchor a
+            # downstream traversal back into the parent.
+            if not _is_within(f, sc_dir):
                 self._send_text(403, "forbidden"); return
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text(text, encoding="utf-8")
             self._send_json(200, {"ok": True, "path": str(f)})
 
-        def _api_scenario_create(self, body: dict[str, Any]) -> None:
+        def _api_scenario_create(self, body: Any) -> None:
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "body must be a JSON object"}); return
             _, r = _resolved()
             sc_dir = r.scenarios_dir
             name = (body.get("name") or "").strip()
-            if not name or "/" in name or name.startswith("."):
+            if not _valid_scenario_name(name):
                 self._send_json(400, {"error": "invalid scenario name"}); return
             d = sc_dir / name
+            if not _is_within(d, sc_dir):
+                self._send_text(403, "forbidden"); return
             if d.exists():
                 self._send_json(400, {"error": "already exists"}); return
             d.mkdir(parents=True)
@@ -504,6 +525,11 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             except ValueError:
                 self._send_text(403, "forbidden"); return
             f.write_text(text, encoding="utf-8")
+            # Bust the in-process ``lru_cache`` on ``load_playbook`` so any
+            # in-process consumer (tests, future in-proc agent runner) sees
+            # the new text on the next call.
+            from ..playbooks import load_playbook
+            load_playbook.cache_clear()
             self._send_json(200, {"ok": True})
 
         def _api_list_schemas(self) -> None:
@@ -529,7 +555,9 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 self._send_json(404, {"error": "job not found"}); return
             self._send_json(200, job)
 
-        def _api_implement(self, body: dict[str, Any]) -> None:
+        def _api_implement(self, body: Any) -> None:
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "body must be a JSON object"}); return
             _, r = _resolved()
             request = (body.get("request") or "").strip()
             if not request:
@@ -556,6 +584,33 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             self._send_json(202, {"job_id": job_id})
 
     return Handler
+
+
+def _valid_scenario_name(name: str) -> bool:
+    """A scenario name must be a single safe path segment.
+
+    Rejects empty, hidden (leading dot, which also rejects ``..``), path
+    separators on any OS, NUL bytes, and URL-encoded separators that
+    survived ``urlparse`` (which intentionally does not decode ``%2F``).
+    """
+    if not name:
+        return False
+    if name.startswith("."):
+        return False
+    for bad in ("/", "\\", "\x00", "%2f", "%2F", "%5c", "%5C"):
+        if bad in name:
+            return False
+    return True
+
+
+def _is_within(p: Path, root: Path) -> bool:
+    """True iff ``p.resolve()`` is the same as ``root.resolve()`` or
+    sits inside it."""
+    try:
+        p.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def _read_safe_json(p: Path) -> Any:

@@ -521,17 +521,13 @@ class Orchestrator:
             output_schema_name="failure_triage.v1.json",
             budget_seconds=900,
         )
-        try:
-            schemas.validate("failure_triage.v1.json", triage_res.output)
-            triage = triage_res.output
-        except Exception as e:
-            triage = _synth_triage_invalid_output(str(e))
-
-        ledger.record_ai_call(
-            iteration, 10 + attempt, f"triage_attempt_{attempt}",
-            input_obj=redact(triage_input),
-            output_obj=triage,
-            raw_provider_log=triage_res.raw_log,
+        triage = self._validate_or_synth_triage(
+            triage_res=triage_res,
+            ledger=ledger,
+            iteration=iteration,
+            ordinal=10 + attempt,
+            phase=f"triage_attempt_{attempt}",
+            triage_input=triage_input,
         )
 
         # 9. bounded follow-up diagnostic requests
@@ -558,17 +554,13 @@ class Orchestrator:
                 output_schema_name="failure_triage.v1.json",
                 budget_seconds=900,
             )
-            try:
-                schemas.validate("failure_triage.v1.json", triage_res.output)
-                triage = triage_res.output
-            except Exception as e:
-                triage = _synth_triage_invalid_output(str(e))
-            ledger.record_ai_call(
-                iteration, 20 + attempt * 10 + rounds,
-                f"triage_attempt_{attempt}_round_{rounds}",
-                input_obj=redact(triage_input),
-                output_obj=triage,
-                raw_provider_log=triage_res.raw_log,
+            triage = self._validate_or_synth_triage(
+                triage_res=triage_res,
+                ledger=ledger,
+                iteration=iteration,
+                ordinal=20 + attempt * 10 + rounds,
+                phase=f"triage_attempt_{attempt}_round_{rounds}",
+                triage_input=triage_input,
             )
 
         outcome = {
@@ -581,6 +573,58 @@ class Orchestrator:
         }
         write_json(attempt_dir / "outcome.json", outcome)
         return outcome
+
+    def _validate_or_synth_triage(
+        self,
+        *,
+        triage_res,
+        ledger: TaskLedger,
+        iteration: int,
+        ordinal: int,
+        phase: str,
+        triage_input: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Schema-validate the agent's triage output and record an AI call.
+
+        Critically: the AI call record must preserve the *actual* agent
+        output, even when it fails schema validation, so the audit trail
+        shows what the agent really produced (design §20). When the output
+        is invalid we synthesize a harness fallback and record it as a
+        separate, clearly-labeled AI-like call so downstream reviewers can
+        tell which decisions were the model's vs the harness's.
+        """
+        raw_output = triage_res.output
+        try:
+            schemas.validate("failure_triage.v1.json", raw_output)
+            ledger.record_ai_call(
+                iteration, ordinal, phase,
+                input_obj=redact(triage_input),
+                output_obj=raw_output,
+                raw_provider_log=triage_res.raw_log,
+            )
+            return raw_output
+        except Exception as e:
+            # 1. Record the *actual* agent output as the AI call so audit
+            #    preserves what the model produced.
+            ledger.record_ai_call(
+                iteration, ordinal, phase,
+                input_obj=redact(triage_input),
+                output_obj=raw_output if isinstance(raw_output, dict)
+                           else {"_raw": str(raw_output)},
+                raw_provider_log=triage_res.raw_log,
+            )
+            # 2. Record the harness-synthesized fallback separately so it's
+            #    obvious in the audit trail that this decision came from the
+            #    harness, not the agent.
+            synth = _synth_triage_invalid_output(str(e))
+            ledger.record_ai_call(
+                iteration, ordinal, f"{phase}_harness_fallback",
+                input_obj={"reason": "agent triage failed schema validation",
+                           "validation_error": str(e)},
+                output_obj=synth,
+                raw_provider_log=None,
+            )
+            return synth
 
     # diagnostics -------------------------------------------------------
 
