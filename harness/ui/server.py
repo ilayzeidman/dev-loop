@@ -1422,21 +1422,111 @@ def _parse_page_args(query: str) -> tuple[int | None, int]:
     return limit, offset
 
 
-def _summarize_run_for_compare(runs_dir: Path, task_id: str) -> dict[str, Any] | None:
-    """Compact summary used by the cross-run compare view.
+_RUN_SUMMARY_CACHE_LOCK = threading.Lock()
+_RUN_SUMMARY_CACHE: dict[tuple[str, str], tuple[Any, dict[str, Any] | None]] = {}
 
-    Thin adapter over :func:`harness.runs.show_run` + :func:`audit_rollup`
-    — the canonical ledger readers in ``harness.runs`` are the source of
-    truth for what a run looks like. We only project iteration fields
-    into the wire shape the UI client expects (``i`` instead of
-    ``iteration``, summary truncated to 240 chars, no ``error`` key) and
-    layer the audit rollup on top.
 
-    Returns ``None`` when the run dir or manifest is missing so the
-    endpoint can return a partial payload (missing-A or missing-B)
-    rather than 404'ing the whole comparison — that's what keeps a
-    stale share link from blanking the page.
+def _clear_run_summary_cache() -> None:
+    """Drop the per-run show+audit memo. Tests call this between server
+    instances that share a ``runs_dir``; production relies on the
+    signature to catch all mutations."""
+    with _RUN_SUMMARY_CACHE_LOCK:
+        _RUN_SUMMARY_CACHE.clear()
+
+
+def _run_summary_signature(run_root: Path) -> Any:
+    """Stat-based fingerprint that changes iff the compare-shaped summary
+    for ``run_root`` would change.
+
+    ``show_run`` opens the task manifest plus every iteration's
+    ``manifest.json``, counts ``validations/`` subdirs, and walks each
+    iteration's ``ai_calls/`` directory. ``audit_rollup`` parses
+    ``capability_audit.jsonl`` line-by-line. Each of those inputs is
+    bumped by the orchestrator when its contents change, so stat'ing
+    them is sufficient — and ~100x cheaper than re-parsing.
+
+    Returns a hashable tuple. A missing run reports ``("missing",)``
+    so a not-yet-existing task id still memoises a single ``None``
+    until its directory appears.
     """
+    tm = run_root / "task_manifest.json"
+    try:
+        tm_st = tm.stat()
+    except OSError:
+        return ("missing",)
+    audit_path = run_root / "capability_audit.jsonl"
+    try:
+        au_st = audit_path.stat()
+        audit_sig = (au_st.st_mtime_ns, au_st.st_size)
+    except OSError:
+        audit_sig = (0, 0)
+    iters_root = run_root / "iterations"
+    try:
+        iters_st = iters_root.stat()
+        iters_root_sig = iters_st.st_mtime_ns
+    except OSError:
+        iters_root_sig = 0
+    iter_entries: list[tuple[str, int, int, int, int, int]] = []
+    try:
+        scan = os.scandir(iters_root)
+    except OSError:
+        scan = None
+    if scan is not None:
+        with scan:
+            for de in scan:
+                if not de.is_dir(follow_symlinks=False):
+                    continue
+                im_mtime = 0
+                try:
+                    im_mtime = os.stat(
+                        os.path.join(de.path, "manifest.json"),
+                    ).st_mtime_ns
+                except OSError:
+                    pass
+                v_mtime = 0
+                v_count = 0
+                try:
+                    v_mtime = os.stat(
+                        os.path.join(de.path, "validations"),
+                    ).st_mtime_ns
+                    with os.scandir(
+                        os.path.join(de.path, "validations"),
+                    ) as vv:
+                        v_count = sum(
+                            1 for s in vv
+                            if s.is_dir(follow_symlinks=False)
+                        )
+                except OSError:
+                    pass
+                ai_mtime = 0
+                ai_count = 0
+                try:
+                    ai_mtime = os.stat(
+                        os.path.join(de.path, "ai_calls"),
+                    ).st_mtime_ns
+                    with os.scandir(
+                        os.path.join(de.path, "ai_calls"),
+                    ) as ai:
+                        ai_count = sum(
+                            1 for s in ai
+                            if s.is_dir(follow_symlinks=False)
+                        )
+                except OSError:
+                    pass
+                iter_entries.append(
+                    (de.name, im_mtime, v_mtime, v_count, ai_mtime, ai_count),
+                )
+    iter_entries.sort()
+    return (
+        (tm_st.st_mtime_ns, tm_st.st_size),
+        audit_sig,
+        iters_root_sig,
+        tuple(iter_entries),
+    )
+
+
+def _compute_run_summary_for_compare(runs_dir: Path,
+                                     task_id: str) -> dict[str, Any] | None:
     canonical = _runs_show_run(runs_dir, task_id)
     if canonical is None:
         return None
@@ -1466,6 +1556,42 @@ def _summarize_run_for_compare(runs_dir: Path, task_id: str) -> dict[str, Any] |
         "iterations": iters,
         "audit": _runs_audit_rollup(Path(canonical["path"])),
     }
+
+
+def _summarize_run_for_compare(runs_dir: Path, task_id: str) -> dict[str, Any] | None:
+    """Compact summary used by the cross-run compare view.
+
+    Thin adapter over :func:`harness.runs.show_run` + :func:`audit_rollup`
+    — the canonical ledger readers in ``harness.runs`` are the source of
+    truth for what a run looks like. We only project iteration fields
+    into the wire shape the UI client expects (``i`` instead of
+    ``iteration``, summary truncated to 240 chars, no ``error`` key) and
+    layer the audit rollup on top.
+
+    Memoised per-run on a stat-based signature (Iter 16 follow-up) so
+    repeated compare loads — picking the same A and swapping B, or
+    polling the same run while it streams — don't re-parse every
+    iteration manifest. Mirrors the trends cache pattern: cheap stat
+    calls catch any orchestrator mutation, no manual invalidation.
+
+    Returns ``None`` when the run dir or manifest is missing so the
+    endpoint can return a partial payload (missing-A or missing-B)
+    rather than 404'ing the whole comparison — that's what keeps a
+    stale share link from blanking the page.
+    """
+    run_root = runs_dir / task_id
+    key = (str(runs_dir), task_id)
+    sig = _run_summary_signature(run_root)
+    with _RUN_SUMMARY_CACHE_LOCK:
+        hit = _RUN_SUMMARY_CACHE.get(key)
+        if hit is not None and hit[0] == sig:
+            cached = hit[1]
+            return copy.deepcopy(cached) if cached is not None else None
+
+    payload = _compute_run_summary_for_compare(runs_dir, task_id)
+    with _RUN_SUMMARY_CACHE_LOCK:
+        _RUN_SUMMARY_CACHE[key] = (sig, payload)
+    return copy.deepcopy(payload) if payload is not None else None
 
 
 def _compare_deltas(a: dict[str, Any] | None,

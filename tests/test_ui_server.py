@@ -1354,6 +1354,125 @@ def test_compare_deltas_helper_pure():
     assert _compare_deltas(a, None)["both_present"] is False
 
 
+def test_run_summary_cache_skips_recompute_when_signature_unchanged(
+        tmp_path: Path):
+    """A second compare load for the same run pair must hit the per-run
+    show+audit memo and avoid re-walking iteration manifests."""
+    from harness.ui import server as srv
+
+    srv._clear_run_summary_cache()
+    _write_run(tmp_path, "run-a", iterations=[
+        {"i": 1, "final_e2e_status": "passed", "patch_hash": "aa",
+         "changed_files": ["x.py"], "attempts": 1},
+    ], audit_entries=[{"capability": "fs.read", "status": "ok"}])
+    _write_run(tmp_path, "run-b", iterations=[
+        {"i": 1, "final_e2e_status": "passed", "patch_hash": "bb",
+         "changed_files": ["y.py"], "attempts": 1},
+    ])
+    calls = {"n": 0}
+    original = srv._compute_run_summary_for_compare
+
+    def _spy(runs_dir: Path, task_id: str):
+        calls["n"] += 1
+        return original(runs_dir, task_id)
+
+    srv._compute_run_summary_for_compare = _spy
+    try:
+        with _server(tmp_path) as (port, _):
+            first = json.loads(_get(port, "/api/runs/run-a/compare/run-b")[1])
+            second = json.loads(_get(port, "/api/runs/run-a/compare/run-b")[1])
+    finally:
+        srv._compute_run_summary_for_compare = original
+
+    assert first == second
+    assert calls["n"] == 2  # cold compute for run-a and run-b, then both cached
+
+
+def test_run_summary_cache_invalidates_when_iteration_added(tmp_path: Path):
+    """A new ``iter-NNN`` directory must bump the signature so the next
+    compare load reflects the iteration count without a server restart."""
+    from harness.ui import server as srv
+
+    srv._clear_run_summary_cache()
+    run_dir = _write_run(tmp_path, "run-a", iterations=[
+        {"i": 1, "final_e2e_status": "failed", "patch_hash": "aa",
+         "changed_files": ["x.py"]},
+    ])
+    _write_run(tmp_path, "run-b", iterations=[
+        {"i": 1, "final_e2e_status": "passed", "patch_hash": "bb",
+         "changed_files": ["y.py"]},
+    ])
+    with _server(tmp_path) as (port, _):
+        before = json.loads(_get(port, "/api/runs/run-a/compare/run-b")[1])
+        assert before["a"]["iteration_count"] == 1
+        new_iter = run_dir / "iterations" / "iter-002"
+        new_iter.mkdir()
+        (new_iter / "manifest.json").write_text(json.dumps({
+            "iteration": 2,
+            "final_e2e_status": "passed",
+            "code": {"patch_hash": "cc", "changed_files": ["z.py"]},
+        }))
+        (new_iter / "validations").mkdir()
+        after = json.loads(_get(port, "/api/runs/run-a/compare/run-b")[1])
+        assert after["a"]["iteration_count"] == 2
+        assert after["a"]["iterations"][-1]["patch_hash"] == "cc"
+
+
+def test_run_summary_cache_invalidates_when_audit_grows(tmp_path: Path):
+    """Appending to ``capability_audit.jsonl`` changes its mtime+size,
+    so the cached audit rollup must refresh on the next compare load."""
+    from harness.ui import server as srv
+
+    srv._clear_run_summary_cache()
+    run_dir = _write_run(tmp_path, "run-a", iterations=[
+        {"i": 1, "final_e2e_status": "passed"},
+    ], audit_entries=[{"capability": "fs.read", "status": "ok"}])
+    _write_run(tmp_path, "run-b", iterations=[
+        {"i": 1, "final_e2e_status": "passed"},
+    ])
+    with _server(tmp_path) as (port, _):
+        before = json.loads(_get(port, "/api/runs/run-a/compare/run-b")[1])
+        assert before["a"]["audit"]["total"] == 1
+        audit_path = run_dir / "capability_audit.jsonl"
+        with audit_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"capability": "fs.write", "status": "denied"})
+                    + "\n")
+        after = json.loads(_get(port, "/api/runs/run-a/compare/run-b")[1])
+        assert after["a"]["audit"]["total"] == 2
+        assert after["a"]["audit"]["by_status"].get("denied") == 1
+
+
+def test_run_summary_cache_memoises_missing_run(tmp_path: Path):
+    """A not-yet-existing task id still memoises ``None`` so repeated
+    stale share-link loads don't keep calling ``show_run``."""
+    from harness.ui import server as srv
+
+    srv._clear_run_summary_cache()
+    _write_run(tmp_path, "run-a", iterations=[
+        {"i": 1, "final_e2e_status": "passed"},
+    ])
+    calls = {"n": 0}
+    original = srv._compute_run_summary_for_compare
+
+    def _spy(runs_dir: Path, task_id: str):
+        calls["n"] += 1
+        return original(runs_dir, task_id)
+
+    srv._compute_run_summary_for_compare = _spy
+    try:
+        with _server(tmp_path) as (port, _):
+            first = json.loads(
+                _get(port, "/api/runs/run-a/compare/missing-run")[1])
+            second = json.loads(
+                _get(port, "/api/runs/run-a/compare/missing-run")[1])
+    finally:
+        srv._compute_run_summary_for_compare = original
+
+    assert first["b"] is None and second["b"] is None
+    # 2 computes on the first call (a + missing), 0 on the second.
+    assert calls["n"] == 2
+
+
 def test_palette_exposes_compare_action(tmp_path: Path):
     """Cmd+K -> "compare two runs" must be reachable so users discover
     the cross-run diff without hunting through the sidebar."""
