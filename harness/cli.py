@@ -17,6 +17,8 @@ Subcommands:
   dev-loop scenarios validate [name]      # lint one or all scenarios
   dev-loop capabilities ls                # list capabilities in the registry
   dev-loop capabilities show <name>       # detail view of one capability
+  dev-loop playbooks ls                   # list agent playbooks (built-in + override)
+  dev-loop playbooks show <name>          # print one playbook + metadata
   dev-loop bundle export [--out FILE]     # pack config+scenarios+playbooks
   dev-loop bundle import FILE [--apply]   # preview / apply a bundle
 """
@@ -40,6 +42,7 @@ from .bundle import (
     validate_bundle,
 )
 from .capabilities import list_capabilities, load_default_registry, show_capability
+from .playbooks import list_playbooks, show_playbook
 from .config import (
     CONFIG_DIR_NAME,
     CONFIG_FILE_NAME,
@@ -239,6 +242,39 @@ def main(argv: list[str] | None = None) -> int:
         help="emit JSON instead of a human-readable summary",
     )
 
+    p_pb = sub.add_parser(
+        "playbooks",
+        help="inspect agent playbooks (ls / show) — same source of truth as "
+             "the Build > Playbooks UI tab",
+    )
+    pb_sub = p_pb.add_subparsers(dest="playbooks_cmd", required=True)
+    p_pb_ls = pb_sub.add_parser(
+        "ls",
+        help="list built-in playbooks and per-repo overrides",
+    )
+    p_pb_ls.add_argument(
+        "--overridden-only", action="store_true",
+        help="only show playbooks the current repo has overridden",
+    )
+    p_pb_ls.add_argument(
+        "--json", action="store_true",
+        help="emit JSON instead of a human-readable table",
+    )
+    p_pb_show = pb_sub.add_parser(
+        "show", help="print a playbook (text + source + agent-phase bindings)",
+    )
+    p_pb_show.add_argument(
+        "name", help="playbook filename (e.g. implement_feature.v1.md)",
+    )
+    p_pb_show.add_argument(
+        "--metadata-only", action="store_true",
+        help="omit the body and print only the summary fields",
+    )
+    p_pb_show.add_argument(
+        "--json", action="store_true",
+        help="emit JSON instead of a human-readable summary",
+    )
+
     p_ui = sub.add_parser("ui", help="launch the local web UI")
     p_ui.add_argument("--host", default="127.0.0.1")
     p_ui.add_argument("--port", type=int, default=8765)
@@ -320,6 +356,21 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.capabilities_cmd == "show":
             return _cmd_capabilities_show(name=args.name, as_json=args.json)
+
+    if args.cmd == "playbooks":
+        if args.playbooks_cmd == "ls":
+            return _cmd_playbooks_ls(
+                repo=repo,
+                overridden_only=args.overridden_only,
+                as_json=args.json,
+            )
+        if args.playbooks_cmd == "show":
+            return _cmd_playbooks_show(
+                repo=repo,
+                name=args.name,
+                metadata_only=args.metadata_only,
+                as_json=args.json,
+            )
 
     cfg = HarnessConfig.load(repo_root=repo, explicit_path=args.config)
     resolved = cfg.resolved(repo)
@@ -1120,6 +1171,125 @@ def _cmd_capabilities_show(*, name: str, as_json: bool) -> int:
         )
         return 1
     return 0
+
+
+def _cmd_playbooks_ls(
+    *, repo: Path, overridden_only: bool, as_json: bool,
+) -> int:
+    """``dev-loop playbooks ls`` — mirror Build > Playbooks in the terminal.
+
+    The web UI's playbook picker reads the same list. Showing the source
+    ("built-in" vs "repo-override"), file size and the agent phases bound
+    to each playbook makes it easy to answer "did my repo's override
+    actually take effect?" without dropping into the browser.
+    """
+    rows = list_playbooks(repo=repo)
+    if overridden_only:
+        rows = [r for r in rows if r["overridden"]]
+
+    if as_json:
+        print(json.dumps(
+            {"repo": str(repo), "playbooks": rows}, indent=2,
+        ))
+        return 0
+
+    if not rows:
+        if overridden_only:
+            print("no per-repo playbook overrides found.")
+            print(
+                "  drop a file into .dev-loop/playbooks/<name>.md to override "
+                "a built-in.",
+            )
+        else:
+            print("no playbooks found.")
+        return 0
+
+    headers = ("NAME", "SOURCE", "SIZE", "LINES", "PHASES")
+    table = [headers]
+    for r in rows:
+        phases = ",".join(r.get("agent_phases") or []) or "-"
+        table.append((
+            r["name"],
+            r["source"],
+            _fmt_bytes(r["size_bytes"]),
+            str(r["line_count"]),
+            _truncate(phases, 36),
+        ))
+    widths = [max(len(row[i]) for row in table) for i in range(len(headers))]
+    for row in table:
+        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip())
+
+    overrides = [r["name"] for r in rows if r["overridden"]]
+    if overrides and not overridden_only:
+        print()
+        print(
+            f"{len(overrides)} repo override"
+            f"{'s' if len(overrides) != 1 else ''}: {', '.join(overrides)}",
+        )
+    return 0
+
+
+def _cmd_playbooks_show(
+    *, repo: Path, name: str, metadata_only: bool, as_json: bool,
+) -> int:
+    detail = show_playbook(
+        name, repo=repo, include_text=not metadata_only,
+    )
+    if detail is None:
+        print(f"error: playbook not found: {name}", file=sys.stderr)
+        print(
+            "  try `dev-loop playbooks ls` to see available playbooks.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if as_json:
+        print(json.dumps(detail, indent=2))
+        return 0
+
+    print(f"name:        {detail['name']}")
+    print(f"source:      {detail['source']}")
+    print(f"path:        {detail['path']}")
+    print(f"size:        {_fmt_bytes(detail['size_bytes'])}")
+    print(f"lines:       {detail['line_count']}")
+    phases = detail.get("agent_phases") or []
+    if phases:
+        print(f"agent phases: {', '.join(phases)}")
+    else:
+        print("agent phases: - (not bound to a built-in phase)")
+    if detail["overridden"] and detail["has_builtin"]:
+        print(
+            "note:         this repo overrides the built-in copy. "
+            "Edits flow through .dev-loop/playbooks/.",
+        )
+    elif detail["overridden"] and not detail["has_builtin"]:
+        print(
+            "note:         repo-only playbook (no built-in of this name "
+            "ships with the harness).",
+        )
+
+    if metadata_only:
+        return 0
+    text = detail.get("text") or ""
+    if text:
+        print()
+        print("--- begin playbook ---")
+        sys.stdout.write(text if text.endswith("\n") else text + "\n")
+        print("--- end playbook ---")
+    if detail.get("read_error"):
+        print(f"\nwarning: failed to read playbook body: {detail['read_error']}",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
+def _fmt_bytes(n: int) -> str:
+    if n < 1024:
+        return f"{n}B"
+    kb = n / 1024
+    if kb < 1024:
+        return f"{kb:.1f}KB"
+    return f"{kb/1024:.1f}MB"
 
 
 def _cmd_schema_validate(file: Path, schema_name: str) -> int:

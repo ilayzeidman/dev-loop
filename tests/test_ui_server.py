@@ -1516,7 +1516,12 @@ def _post_text(port: int, path: str, text: str) -> tuple[int, dict]:
 
 def test_playbook_list_marks_overridden_and_reports_dir(tmp_path: Path):
     """The list endpoint tags repo overrides and tells the UI where saves
-    land, so the banner can show an honest path without guessing."""
+    land, so the banner can show an honest path without guessing.
+
+    It also surfaces the same metadata fields the CLI's
+    ``dev-loop playbooks ls`` prints (source label, line count, agent
+    phases), since both share ``harness.playbooks.list_playbooks``.
+    """
     with _server(tmp_path) as (port, _):
         status, body = _get(port, "/api/playbooks")
         assert status == 200
@@ -1524,8 +1529,19 @@ def test_playbook_list_marks_overridden_and_reports_dir(tmp_path: Path):
         assert isinstance(data["playbooks"], list)
         assert data["playbooks"], "built-in playbooks should be listed"
         for entry in data["playbooks"]:
-            assert set(entry.keys()) >= {"name", "overridden"}
+            assert set(entry.keys()) >= {
+                "name", "overridden", "source", "has_builtin",
+                "size_bytes", "line_count", "agent_phases",
+            }
             assert entry["overridden"] is False
+            assert entry["source"] == "built-in"
+        # Spot-check that phase bindings are propagated, so the UI picker
+        # can hint which playbook drives which agent step.
+        impl = next(
+            p for p in data["playbooks"]
+            if p["name"] == "implement_feature.v1.md"
+        )
+        assert set(impl["agent_phases"]) == {"implementation", "task_contract"}
         assert data["override_dir"] == ".dev-loop/playbooks"
 
 

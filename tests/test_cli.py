@@ -883,3 +883,143 @@ def test_capabilities_does_not_require_repo_config(tmp_path: Path):
     assert not (tmp_path / ".dev-loop").exists()
     rc = cli.main(["--repo", str(tmp_path), "capabilities", "ls"])
     assert rc == 0
+
+
+# playbooks ls/show ----------------------------------------------------
+
+
+def test_playbooks_ls_renders_table_with_builtin_rows(
+    tmp_path: Path, capsys,
+):
+    """`playbooks ls` mirrors the Build > Playbooks UI tab. The table must
+    list every built-in playbook and tag the source so a user can tell at
+    a glance whether their repo override took effect."""
+    rc = cli.main(["--repo", str(tmp_path), "playbooks", "ls"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "NAME" in out and "SOURCE" in out and "PHASES" in out
+    assert "implement_feature.v1.md" in out
+    assert "gpu_e2e_failure_triage.v1.md" in out
+    assert "built-in" in out
+    # The implement_feature playbook is bound to two agent phases — surface that.
+    impl_line = next(
+        ln for ln in out.splitlines() if ln.startswith("implement_feature.v1.md")
+    )
+    assert "implementation" in impl_line
+    assert "task_contract" in impl_line
+
+
+def test_playbooks_ls_json_payload_has_expected_fields(
+    tmp_path: Path, capsys,
+):
+    rc = cli.main(["--repo", str(tmp_path), "playbooks", "ls", "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "playbooks" in payload
+    rows = payload["playbooks"]
+    assert rows
+    names = {r["name"] for r in rows}
+    assert "implement_feature.v1.md" in names
+    impl = next(r for r in rows if r["name"] == "implement_feature.v1.md")
+    expected_keys = {
+        "name", "source", "overridden", "has_builtin", "path",
+        "size_bytes", "line_count", "agent_phases",
+    }
+    assert expected_keys.issubset(impl.keys())
+    assert impl["source"] == "built-in"
+    assert impl["overridden"] is False
+    assert impl["has_builtin"] is True
+    assert set(impl["agent_phases"]) == {"implementation", "task_contract"}
+
+
+def test_playbooks_ls_detects_repo_override(tmp_path: Path, capsys):
+    """A file at $REPO/.dev-loop/playbooks/<name>.md must flip the source
+    column to ``repo-override`` so the user can confirm their edit landed."""
+    pb_dir = tmp_path / ".dev-loop" / "playbooks"
+    pb_dir.mkdir(parents=True)
+    (pb_dir / "implement_feature.v1.md").write_text("# override\n")
+
+    rc = cli.main([
+        "--repo", str(tmp_path),
+        "playbooks", "ls", "--overridden-only", "--json",
+    ])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["playbooks"]) == 1
+    row = payload["playbooks"][0]
+    assert row["name"] == "implement_feature.v1.md"
+    assert row["source"] == "repo-override"
+    assert row["overridden"] is True
+    assert row["has_builtin"] is True
+
+
+def test_playbooks_show_text_emits_body_and_metadata(tmp_path: Path, capsys):
+    rc = cli.main([
+        "--repo", str(tmp_path),
+        "playbooks", "show", "implement_feature.v1.md",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "name:        implement_feature.v1.md" in out
+    assert "source:      built-in" in out
+    assert "agent phases: implementation, task_contract" in out
+    assert "--- begin playbook ---" in out
+    assert "--- end playbook ---" in out
+    assert "implementation_goal" in out  # body content
+
+
+def test_playbooks_show_metadata_only_omits_body(tmp_path: Path, capsys):
+    rc = cli.main([
+        "--repo", str(tmp_path),
+        "playbooks", "show", "implement_feature.v1.md", "--metadata-only",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "name:" in out
+    assert "--- begin playbook ---" not in out
+    assert "implementation_goal" not in out
+
+
+def test_playbooks_show_json_includes_text(tmp_path: Path, capsys):
+    rc = cli.main([
+        "--repo", str(tmp_path),
+        "playbooks", "show", "implement_feature.v1.md", "--json",
+    ])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["name"] == "implement_feature.v1.md"
+    assert payload["source"] == "built-in"
+    assert "# Playbook: implement_feature" in payload["text"]
+
+
+def test_playbooks_show_missing_clean_error(tmp_path: Path, capsys):
+    rc = cli.main([
+        "--repo", str(tmp_path), "playbooks", "show", "nope.md",
+    ])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "not found" in err.lower()
+    assert "playbooks ls" in err
+
+
+def test_playbooks_show_prefers_repo_override(tmp_path: Path, capsys):
+    pb_dir = tmp_path / ".dev-loop" / "playbooks"
+    pb_dir.mkdir(parents=True)
+    (pb_dir / "implement_feature.v1.md").write_text("# repo override body\n")
+
+    rc = cli.main([
+        "--repo", str(tmp_path),
+        "playbooks", "show", "implement_feature.v1.md", "--json",
+    ])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["source"] == "repo-override"
+    assert payload["text"] == "# repo override body\n"
+
+
+def test_playbooks_does_not_require_repo_config(tmp_path: Path):
+    """Like `capabilities`, `playbooks ls/show` must work in a repo with no
+    `.dev-loop/config.yaml` — playbooks ship with the package."""
+    assert not (tmp_path / ".dev-loop").exists()
+    rc = cli.main(["--repo", str(tmp_path), "playbooks", "ls"])
+    assert rc == 0

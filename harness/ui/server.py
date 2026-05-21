@@ -89,7 +89,7 @@ from ..config import (
 )
 from ..doctor import doctor_summary as _doctor_summary
 from ..doctor import run_doctor as _run_doctor
-from ..playbooks import PLAYBOOK_DIR, repo_playbook_dir
+from ..playbooks import PLAYBOOK_DIR, list_playbooks, repo_playbook_dir
 from ..runs import audit_rollup as _runs_audit_rollup
 from ..runs import diff_deltas as _runs_diff_deltas
 from ..runs import iteration_ai_calls as _runs_iteration_ai_calls
@@ -995,19 +995,12 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             self._send_json(200, {"capabilities": list_capabilities()})
 
         def _api_list_playbooks(self) -> None:
+            # Delegate to the shared helper so the UI picker and
+            # ``dev-loop playbooks ls`` see identical fields, including the
+            # agent-phase bindings and source label.
             override_dir = repo_playbook_dir(repo)
-            names: set[str] = set()
-            names.update(p.name for p in PLAYBOOK_DIR.glob("*.md"))
-            if override_dir.exists():
-                names.update(p.name for p in override_dir.glob("*.md"))
-            playbooks = []
-            for name in sorted(names):
-                playbooks.append({
-                    "name": name,
-                    "overridden": (override_dir / name).exists(),
-                })
             self._send_json(200, {
-                "playbooks": playbooks,
+                "playbooks": list_playbooks(repo=repo),
                 "override_dir": str(override_dir.relative_to(repo))
                                  if override_dir.is_relative_to(repo)
                                  else str(override_dir),

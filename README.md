@@ -170,6 +170,30 @@ reviewing the agent's allowed surface from either side sees identical
 data — including `has_impl`, which flags any spec declared in
 `registry.yaml` without a bound implementation.
 
+## Inspecting agent playbooks
+
+Playbooks are the trusted prompt fragments the harness injects when it
+asks the agent to produce a task contract, an implementation result, or a
+failure triage. Built-ins ship inside the package; any repo can override
+one by dropping `.dev-loop/playbooks/<name>.md` alongside its config.
+`dev-loop playbooks` is the headless mirror of the Build > Playbooks UI
+tab:
+
+```bash
+dev-loop playbooks ls                          # built-in + override table
+dev-loop playbooks ls --overridden-only        # only repo overrides
+dev-loop playbooks show implement_feature.v1.md
+dev-loop playbooks show <name> --metadata-only # skip the body
+dev-loop playbooks show <name> --json          # machine-readable
+```
+
+The table flags each row's source (`built-in` / `repo-override`), file
+size, line count, and the agent phases bound to it (e.g.
+`implementation,task_contract`), so it's easy to confirm a repo override
+actually replaced what the loop will read on the next run.
+`harness.playbooks.list_playbooks` / `show_playbook` are the public
+helpers both the CLI and `/api/playbooks` consume.
+
 ## Provider model
 
 V1 supports three providers:
