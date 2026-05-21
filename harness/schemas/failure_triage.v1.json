@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "failure_triage.v1.json",
+  "type": "object",
+  "required": [
+    "type",
+    "failure_class",
+    "confidence",
+    "next_action",
+    "hypothesis",
+    "expected_effect",
+    "evidence_refs",
+    "requested_diagnostics",
+    "human_reason"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "failure_triage" },
+    "failure_class": {
+      "enum": [
+        "code_suspected",
+        "environment_suspected",
+        "harness_suspected",
+        "flaky_test_suspected",
+        "unknown"
+      ]
+    },
+    "confidence": { "enum": ["low", "medium", "high"] },
+    "next_action": {
+      "enum": [
+        "modify_code",
+        "request_more_diagnostics",
+        "rerun_same_code",
+        "declare_environment_issue",
+        "declare_harness_issue",
+        "ask_human",
+        "stop_inconclusive"
+      ]
+    },
+    "hypothesis": { "type": "string", "minLength": 1 },
+    "expected_effect": { "type": "string" },
+    "evidence_refs": { "type": "array", "items": { "type": "string" } },
+    "requested_diagnostics": {
+      "type": "array",
+      "items": { "$ref": "diagnostic_request.v1.json" }
+    },
+    "human_reason": { "type": ["string", "null"] }
+  }
+}

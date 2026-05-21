@@ -1,0 +1,14 @@
+{
+  "status": "passed",
+  "test_suite": "gpu-streaming-e2e",
+  "started_at_utc": "2026-05-21T10:00:00Z",
+  "finished_at_utc": "2026-05-21T10:00:42Z",
+  "device_id": "GPU-0",
+  "duration_seconds": 42,
+  "diagnostic_windows": {
+    "elastic_from_utc": "2026-05-21T10:00:00Z",
+    "elastic_to_utc": "2026-05-21T10:00:42Z",
+    "grafana_from_utc": "2026-05-21T10:00:00Z",
+    "grafana_to_utc": "2026-05-21T10:00:42Z"
+  }
+}

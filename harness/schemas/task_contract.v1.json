@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "task_contract.v1.json",
+  "type": "object",
+  "required": [
+    "type",
+    "implementation_goal",
+    "assumptions",
+    "success_criteria",
+    "non_goals",
+    "likely_components",
+    "validation_plan",
+    "ambiguities",
+    "can_start_without_human"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "task_contract" },
+    "implementation_goal": { "type": "string", "minLength": 1 },
+    "assumptions": { "type": "array", "items": { "type": "string" } },
+    "success_criteria": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "non_goals": { "type": "array", "items": { "type": "string" } },
+    "likely_components": { "type": "array", "items": { "type": "string" } },
+    "validation_plan": { "type": "array", "items": { "type": "string" } },
+    "ambiguities": { "type": "array", "items": { "type": "string" } },
+    "can_start_without_human": { "type": "boolean" }
+  }
+}

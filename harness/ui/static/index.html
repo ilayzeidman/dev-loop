@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>dev-loop</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">dev-loop</div>
+  <nav>
+    <button data-tab="build">Build</button>
+    <button data-tab="run">Run</button>
+    <button data-tab="analyze">Analyze</button>
+  </nav>
+  <div class="repo-pill" id="repo-pill">—</div>
+</header>
+
+<main>
+
+  <!-- BUILD ------------------------------------------------------------- -->
+  <section id="tab-build" class="tab">
+    <div class="cols">
+      <aside class="sidebar">
+        <h3>Builder</h3>
+        <ul class="builder-nav">
+          <li><a href="#" data-builder="overview" class="active">Overview</a></li>
+          <li><a href="#" data-builder="config">Config</a></li>
+          <li><a href="#" data-builder="capabilities">Capabilities</a></li>
+          <li><a href="#" data-builder="playbooks">Playbooks</a></li>
+          <li><a href="#" data-builder="schemas">Schemas</a></li>
+          <li><a href="#" data-builder="scenarios">Scenarios</a></li>
+        </ul>
+      </aside>
+      <div class="content">
+
+        <div class="panel" id="builder-overview">
+          <h2>Flow overview</h2>
+          <p class="muted">
+            The orchestration is built from five pieces. Click any to edit.
+          </p>
+          <ol class="flow">
+            <li>
+              <strong>Task contract</strong> — agent restates the request as
+              goal + success criteria.
+              <div><a href="#" data-jump="schemas:task_contract.v1.json">schema</a>
+              · <a href="#" data-jump="playbooks:implement_feature.v1.md">playbook</a></div>
+            </li>
+            <li>
+              <strong>Implementation</strong> in disposable sandbox.
+              <div><a href="#" data-jump="playbooks:implement_feature.v1.md">playbook</a>
+              · <a href="#" data-jump="schemas:implementation_result.v1.json">schema</a></div>
+            </li>
+            <li>
+              <strong>Patch extraction</strong> &amp; clean reapply.
+            </li>
+            <li>
+              <strong>Validation</strong> through registered capabilities
+              (Jenkins, deploy, E2E).
+              <div><a href="#" data-jump="capabilities:">capabilities</a></div>
+            </li>
+            <li>
+              <strong>Triage</strong> on failure → next action (modify code,
+              ask more diagnostics, escalate).
+              <div><a href="#" data-jump="schemas:failure_triage.v1.json">schema</a>
+              · <a href="#" data-jump="playbooks:gpu_e2e_failure_triage.v1.md">playbook</a></div>
+            </li>
+          </ol>
+          <p class="muted">
+            Loop policy, scenarios and runs dir live in
+            <a href="#" data-jump="config:">config</a>.
+          </p>
+        </div>
+
+        <div class="panel hidden" id="builder-config">
+          <h2>Repository config</h2>
+          <p class="muted" id="cfg-file"></p>
+          <textarea id="cfg-textarea" rows="20" spellcheck="false"></textarea>
+          <div class="row">
+            <button id="cfg-save">Save</button>
+            <button id="cfg-reload" class="secondary">Reload</button>
+            <span id="cfg-status"></span>
+          </div>
+          <details>
+            <summary>Resolved values</summary>
+            <pre id="cfg-resolved"></pre>
+          </details>
+        </div>
+
+        <div class="panel hidden" id="builder-capabilities">
+          <h2>Capabilities</h2>
+          <p class="muted">
+            External actions are gated by this registry. <code>agent_requestable</code>
+            capabilities can appear in a triage's <code>diagnostic_request</code>.
+            <code>forced_params</code> override anything an agent might pass.
+          </p>
+          <table id="cap-table">
+            <thead><tr><th>Name</th><th>Category</th><th>Agent?</th><th>Timeout</th><th>Forced params</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="panel hidden" id="builder-playbooks">
+          <h2>Playbooks</h2>
+          <div class="row">
+            <select id="pb-select"></select>
+            <button id="pb-save">Save</button>
+            <span id="pb-status"></span>
+          </div>
+          <textarea id="pb-textarea" rows="22" spellcheck="false"></textarea>
+        </div>
+
+        <div class="panel hidden" id="builder-schemas">
+          <h2>Schemas</h2>
+          <div class="row">
+            <select id="sch-select"></select>
+          </div>
+          <pre id="sch-content"></pre>
+        </div>
+
+        <div class="panel hidden" id="builder-scenarios">
+          <h2>Replay scenarios</h2>
+          <div class="row">
+            <select id="sc-select"></select>
+            <button id="sc-new">+ new</button>
+          </div>
+          <div id="sc-detail"></div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- RUN --------------------------------------------------------------- -->
+  <section id="tab-run" class="tab hidden">
+    <div class="cols">
+      <aside class="sidebar">
+        <h3>Launch a loop</h3>
+        <label>Request</label>
+        <textarea id="impl-request" rows="6"
+          placeholder="describe what you want the agent to implement"></textarea>
+        <label>Provider</label>
+        <select id="impl-provider">
+          <option value="replay">replay</option>
+          <option value="claude">claude</option>
+          <option value="codex">codex</option>
+        </select>
+        <div id="impl-scenario-row">
+          <label>Scenario (for replay)</label>
+          <select id="impl-scenario"></select>
+        </div>
+        <label>Max iterations (optional)</label>
+        <input id="impl-maxiter" type="number" min="1" max="20" placeholder="(use config)">
+        <button id="impl-go">Run /implement</button>
+        <p class="muted">
+          Each run is recorded under <code>.dev-loop/runs/&lt;task-id&gt;/</code>
+          with the full ledger.
+        </p>
+
+        <h3 style="margin-top:1em">Active jobs</h3>
+        <ul id="job-list" class="job-list"></ul>
+      </aside>
+      <div class="content">
+        <div class="panel">
+          <h2>Live log</h2>
+          <p class="muted" id="job-meta">(no job selected)</p>
+          <pre id="job-log" class="log"></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ANALYZE ----------------------------------------------------------- -->
+  <section id="tab-analyze" class="tab hidden">
+    <div class="cols">
+      <aside class="sidebar">
+        <h3>Past runs</h3>
+        <ul id="run-list" class="run-list"></ul>
+      </aside>
+      <div class="content">
+        <div class="panel" id="analyze-empty">
+          <p class="muted">Pick a run on the left.</p>
+        </div>
+        <div class="panel hidden" id="analyze-detail">
+          <h2 id="ad-title">—</h2>
+          <div id="ad-summary" class="summary"></div>
+
+          <div class="subnav">
+            <button data-ad="report" class="active">Report</button>
+            <button data-ad="iterations">Iterations</button>
+            <button data-ad="audit">Audit log</button>
+            <button data-ad="raw">Raw report</button>
+          </div>
+
+          <div id="ad-report" class="ad-panel"></div>
+          <div id="ad-iterations" class="ad-panel hidden"></div>
+          <div id="ad-audit" class="ad-panel hidden"><pre id="audit-pre"></pre></div>
+          <div id="ad-raw" class="ad-panel hidden"><pre id="raw-pre"></pre></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

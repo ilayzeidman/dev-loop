@@ -1,0 +1,18 @@
+{
+  "type": "implementation_result",
+  "summary": "Added a wait_for_device_ready() poll loop with a 5s timeout in src/encoder/init.py before the first frame is enqueued, and surfaced a readiness gauge.",
+  "hypothesis": "The encoder was starting frame ingestion before nvidia-smi reported the GPU ready, causing init timeout in E2E.",
+  "confidence": "medium",
+  "expected_validation": [
+    "gpu-streaming-e2e reaches PLAYING within 10s",
+    "gpu_util_pct rises above 5% within the first 5s of the run"
+  ],
+  "risk_notes": [
+    "The 5s timeout is conservative; slow nodes may still fail",
+    "Polling interval is hardcoded at 100ms"
+  ],
+  "claimed_changed_files": [
+    "src/encoder/init.py",
+    "src/encoder/device.py"
+  ]
+}

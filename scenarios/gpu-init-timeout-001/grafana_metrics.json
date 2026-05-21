@@ -1,0 +1,7 @@
+{
+  "metrics": {
+    "gpu_util_pct": {"min": 4, "max": 91, "p95": 87},
+    "gpu_mem_used_bytes": {"min": 102400, "max": 8200000000},
+    "encoder_throughput_fps": {"min": 0, "max": 60, "p95": 58}
+  }
+}

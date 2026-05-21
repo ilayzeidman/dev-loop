@@ -1,0 +1,26 @@
+{
+  "type": "task_contract",
+  "implementation_goal": "Make the GPU encoder wait for device readiness before the first frame is pushed.",
+  "assumptions": [
+    "Device readiness is reported by nvidia-smi --query-gpu=ready",
+    "Encoder init is in src/encoder/init.py"
+  ],
+  "success_criteria": [
+    "E2E gpu-streaming-e2e reaches PLAYING within timeout",
+    "No regression on existing encoder unit tests"
+  ],
+  "non_goals": [
+    "Changing the codec",
+    "Adding new metrics dashboards"
+  ],
+  "likely_components": [
+    "src/encoder/init.py",
+    "src/encoder/device.py"
+  ],
+  "validation_plan": [
+    "Run immutable gpu-streaming-e2e in dev cluster",
+    "Inspect Grafana gpu_util_pct during first 5s"
+  ],
+  "ambiguities": [],
+  "can_start_without_human": true
+}

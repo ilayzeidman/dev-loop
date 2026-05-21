@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+build/
+dist/
+
+# Editors
+.vscode/
+.idea/
+
+# dev-loop runtime artifacts
+.dev-loop/
+runs/
+
+# pytest
+.pytest_cache/
+
+# OS
+.DS_Store

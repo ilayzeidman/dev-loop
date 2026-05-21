@@ -1,0 +1,100 @@
+"""Smoke tests for the UI HTTP server (stdlib only)."""
+
+from __future__ import annotations
+
+import json
+import socket
+import threading
+import time
+import urllib.request
+from contextlib import contextmanager
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+
+from harness.ui.server import _JobRegistry, _make_handler
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@contextmanager
+def _server(repo: Path):
+    port = _free_port()
+    jobs = _JobRegistry()
+    handler = _make_handler(repo=repo, jobs=jobs)
+    srv = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        yield port, jobs
+    finally:
+        srv.shutdown()
+
+
+def _get(port: int, path: str) -> tuple[int, str]:
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}")
+    with urllib.request.urlopen(req, timeout=2) as r:
+        return r.status, r.read().decode("utf-8")
+
+
+def _post_json(port: int, path: str, body: dict) -> tuple[int, dict]:
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        method="POST", data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=2) as r:
+        return r.status, json.loads(r.read().decode("utf-8"))
+
+
+def test_index_served(tmp_path: Path):
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/")
+        assert status == 200
+        assert "<title>dev-loop</title>" in body
+
+
+def test_config_api_returns_defaults(tmp_path: Path):
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/config")
+        assert status == 200
+        data = json.loads(body)
+        assert data["default_provider"] == "replay"
+        assert data["repo"] == str(tmp_path.resolve())
+
+
+def test_save_config_round_trip(tmp_path: Path):
+    with _server(tmp_path) as (port, _):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/config/raw",
+            method="POST",
+            data=b"default_provider: claude\npolicy:\n  max_code_iterations: 7\n",
+        )
+        with urllib.request.urlopen(req, timeout=2) as r:
+            assert r.status == 200
+        status, body = _get(port, "/api/config")
+        data = json.loads(body)
+        assert data["default_provider"] == "claude"
+        assert data["policy"]["max_code_iterations"] == 7
+
+
+def test_scenario_create_then_listed(tmp_path: Path):
+    with _server(tmp_path) as (port, _):
+        status, body = _post_json(port, "/api/scenarios", {
+            "name": "foo-001", "task_request": "do a thing",
+        })
+        assert status == 200
+        status, body = _get(port, "/api/scenarios")
+        names = [s["name"] for s in json.loads(body)["scenarios"]]
+        assert "foo-001" in names
+
+
+def test_capabilities_endpoint(tmp_path: Path):
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/capabilities")
+        assert status == 200
+        names = [c["name"] for c in json.loads(body)["capabilities"]]
+        assert "trigger_dev_jenkins_build" in names

@@ -1,0 +1,11 @@
+{
+  "type": "failure_triage",
+  "failure_class": "unknown",
+  "confidence": "low",
+  "next_action": "stop_inconclusive",
+  "hypothesis": "scenario expects E2E to pass; triage should not run",
+  "expected_effect": "",
+  "evidence_refs": [],
+  "requested_diagnostics": [],
+  "human_reason": null
+}

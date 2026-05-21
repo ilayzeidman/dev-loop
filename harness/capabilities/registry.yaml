@@ -1,0 +1,119 @@
+# Capability registry (v1)
+#
+# `agent_requestable: true` means the agent can name this capability in a
+# diagnostic_request. The harness still fills in the parameters that are
+# derived from the run manifest (pod, namespace, version, time window,
+# device_id, etc).
+
+capabilities:
+
+  # local-only
+
+  - name: local_build
+    category: local_only
+    agent_requestable: false
+    timeout_seconds: 600
+    uses_run_manifest: false
+    redacts_output: false
+    audit: true
+    prod_possible: false
+
+  - name: local_test
+    category: local_only
+    agent_requestable: false
+    timeout_seconds: 900
+    uses_run_manifest: false
+    redacts_output: false
+    audit: true
+    prod_possible: false
+
+  # real-dev internal (harness only)
+
+  - name: trigger_dev_jenkins_build
+    category: real_dev_internal
+    agent_requestable: false
+    timeout_seconds: 1800
+    uses_run_manifest: true
+    redacts_output: true
+    audit: true
+    prod_possible: false
+    forced_params:
+      environment: dev
+      deploy_target: dev
+      promote: false
+      publish_release: false
+      production: false
+
+  - name: deploy_dev_validation_version
+    category: real_dev_internal
+    agent_requestable: false
+    timeout_seconds: 900
+    uses_run_manifest: true
+    redacts_output: true
+    audit: true
+    prod_possible: false
+
+  - name: run_immutable_e2e
+    category: real_dev_internal
+    agent_requestable: false
+    timeout_seconds: 1800
+    uses_run_manifest: true
+    redacts_output: true
+    audit: true
+    prod_possible: false
+
+  # real-dev, agent-requestable diagnostics
+
+  - name: fetch_jenkins_status
+    category: real_dev_agent_requestable
+    agent_requestable: true
+    timeout_seconds: 60
+    uses_run_manifest: true
+    redacts_output: true
+    audit: true
+    prod_possible: false
+
+  - name: fetch_jenkins_console_excerpt
+    category: real_dev_agent_requestable
+    agent_requestable: true
+    timeout_seconds: 60
+    uses_run_manifest: true
+    redacts_output: true
+    audit: true
+    prod_possible: false
+
+  - name: query_elastic_for_current_run
+    category: real_dev_agent_requestable
+    agent_requestable: true
+    timeout_seconds: 60
+    uses_run_manifest: true
+    redacts_output: true
+    audit: true
+    prod_possible: false
+
+  - name: get_grafana_metrics_for_current_run
+    category: real_dev_agent_requestable
+    agent_requestable: true
+    timeout_seconds: 60
+    uses_run_manifest: true
+    redacts_output: true
+    audit: true
+    prod_possible: false
+
+  - name: get_pod_logs_for_current_run
+    category: real_dev_agent_requestable
+    agent_requestable: true
+    timeout_seconds: 60
+    uses_run_manifest: true
+    redacts_output: true
+    audit: true
+    prod_possible: false
+
+  - name: collect_gpu_metrics_for_current_run
+    category: real_dev_agent_requestable
+    agent_requestable: true
+    timeout_seconds: 60
+    uses_run_manifest: true
+    redacts_output: true
+    audit: true
+    prod_possible: false
