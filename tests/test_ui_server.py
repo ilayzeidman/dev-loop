@@ -94,6 +94,32 @@ def test_scenario_create_then_listed(tmp_path: Path):
         assert "foo-001" in names
 
 
+def test_scenarios_endpoint_embeds_lint_summary(tmp_path: Path):
+    """``/api/scenarios`` must expose the same lint/health fields the CLI's
+    ``scenarios ls`` prints so the Build tab's picker can show a badge
+    per scenario without an extra round-trip."""
+    sc_dir = tmp_path / "scenarios" / "broken-001"
+    sc_dir.mkdir(parents=True)
+    (sc_dir / "task_request.md").write_text("do a thing", encoding="utf-8")
+    (sc_dir / "task_contract.json").write_text(
+        '{"type": "task_contract"}', encoding="utf-8")
+    (sc_dir / "implementation_result.json").write_text(
+        '{"type": "implementation_result"}', encoding="utf-8")
+    (sc_dir / "e2e_result.json").write_text(
+        '{"status": "passed", "test_suite": "x", "duration_seconds": 1}',
+        encoding="utf-8")
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/scenarios")
+        assert status == 200
+        rows = {s["name"]: s for s in json.loads(body)["scenarios"]}
+        row = rows["broken-001"]
+        for key in ("valid", "n_errors", "n_warnings", "e2e_status", "goal"):
+            assert key in row, key
+        assert row["valid"] is False
+        assert row["n_errors"] >= 1
+        assert row["e2e_status"] == "passed"
+
+
 def test_capabilities_endpoint(tmp_path: Path):
     with _server(tmp_path) as (port, _):
         status, body = _get(port, "/api/capabilities")
@@ -250,6 +276,38 @@ def test_onboarding_reports_unconfigured_state(tmp_path: Path):
         assert all(s["done"] is False for s in data["steps"])
 
 
+def test_onboarding_embeds_doctor_diagnostics(tmp_path: Path):
+    """The first-run panel should include the same checks `dev-loop doctor`
+    emits, so the UI and CLI never disagree on what's broken."""
+    with _server(tmp_path) as (port, _):
+        _, body = _get(port, "/api/onboarding")
+        data = json.loads(body)
+        diag = data.get("diagnostics")
+        assert isinstance(diag, dict), diag
+        labels = [c["label"] for c in diag["checks"]]
+        # The doctor's stable label set must be present and ordered.
+        assert labels[:3] == ["repo_dir", "config_file", "git_repo"]
+        # Every check has level + message; unconfigured repo has warnings.
+        for c in diag["checks"]:
+            assert c["level"] in {"ok", "warning", "error"}
+            assert c["message"]
+        s = diag["summary"]
+        assert {"ok", "warning", "error"} <= set(s)
+        assert s["warning"] >= 1, diag
+
+
+def test_doctor_endpoint_matches_doctor_module(tmp_path: Path):
+    """GET /api/doctor must delegate to harness.doctor (single source of truth)."""
+    from harness.doctor import run_doctor
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/doctor")
+        assert status == 200
+        data = json.loads(body)
+        ui_labels = [c["label"] for c in data["checks"]]
+        cli_labels = [c.label for c in run_doctor(tmp_path)]
+        assert ui_labels == cli_labels
+
+
 def test_init_endpoint_writes_config_and_starter(tmp_path: Path):
     """POST /api/init should scaffold config, gitignore, and the starter."""
     with _server(tmp_path) as (port, _):
@@ -349,12 +407,80 @@ def test_runs_list_surfaces_goal_and_duration(tmp_path: Path):
     with _server(tmp_path) as (port, _):
         status, body = _get(port, "/api/runs")
         assert status == 200
-        runs = json.loads(body)["runs"]
+        payload = json.loads(body)
+        runs = payload["runs"]
         assert len(runs) == 1
         r = runs[0]
         assert r["goal"] == "ship a delightful UI"
         assert r["duration_seconds"] == 18
         assert r["iterations"] == 1
+        page = payload["pagination"]
+        assert page["total"] == 1
+        assert page["returned"] == 1
+        assert page["has_more"] is False
+
+
+def _write_fake_run_dir(repo: Path, task_id: str) -> None:
+    """Hand-roll a minimal run dir under the default ``.dev-loop/runs/``
+    so the pagination tests don't have to take a dependency on the
+    orchestrator."""
+    d = repo / ".dev-loop" / "runs" / task_id
+    d.mkdir(parents=True)
+    (d / "task_manifest.json").write_text(json.dumps({
+        "task_id": task_id,
+        "status": "completed",
+        "final_status": "passed",
+        "created_at_utc": "2026-05-21T12:00:00Z",
+        "updated_at_utc": "2026-05-21T12:01:00Z",
+        "task_contract": {"implementation_goal": f"goal for {task_id}"},
+    }))
+    (d / "iterations").mkdir()
+
+
+def test_runs_list_paginates_via_limit_and_offset(tmp_path: Path):
+    """``/api/runs?limit=&offset=`` pages newest-first. The first page
+    must include ``has_more=True`` and the second must pick up exactly
+    where the first left off — so the UI's Load-more button can stream
+    the rest of a multi-thousand-entry ledger without re-fetching what
+    it already has."""
+    for i in range(5):
+        _write_fake_run_dir(tmp_path, f"2026010{i + 1}-000000-r{i}")
+    with _server(tmp_path) as (port, _):
+        _, body = _get(port, "/api/runs?limit=2&offset=0")
+        first = json.loads(body)
+        assert [r["task_id"] for r in first["runs"]] == [
+            "20260105-000000-r4", "20260104-000000-r3",
+        ]
+        page1 = first["pagination"]
+        assert page1["limit"] == 2
+        assert page1["offset"] == 0
+        assert page1["returned"] == 2
+        assert page1["total"] == 5
+        assert page1["has_more"] is True
+
+        _, body = _get(port, "/api/runs?limit=2&offset=2")
+        second = json.loads(body)
+        assert [r["task_id"] for r in second["runs"]] == [
+            "20260103-000000-r2", "20260102-000000-r1",
+        ]
+        assert second["pagination"]["has_more"] is True
+
+        _, body = _get(port, "/api/runs?limit=2&offset=4")
+        third = json.loads(body)
+        assert [r["task_id"] for r in third["runs"]] == ["20260101-000000-r0"]
+        assert third["pagination"]["has_more"] is False
+
+
+def test_runs_list_garbage_paging_args_fall_back_to_defaults(tmp_path: Path):
+    """A hand-edited URL with non-numeric paging args must not 500 —
+    the listing is the user's escape hatch back to a working state."""
+    _write_fake_run_dir(tmp_path, "20260521-aaaaaa-demo")
+    with _server(tmp_path) as (port, _):
+        status, body = _get(port, "/api/runs?limit=abc&offset=-9")
+        assert status == 200
+        payload = json.loads(body)
+        assert len(payload["runs"]) == 1
+        assert payload["pagination"]["offset"] == 0
 
 
 def test_bundle_export_endpoint_returns_valid_bundle(tmp_path: Path):
@@ -1228,6 +1354,125 @@ def test_compare_deltas_helper_pure():
     assert _compare_deltas(a, None)["both_present"] is False
 
 
+def test_run_summary_cache_skips_recompute_when_signature_unchanged(
+        tmp_path: Path):
+    """A second compare load for the same run pair must hit the per-run
+    show+audit memo and avoid re-walking iteration manifests."""
+    from harness.ui import server as srv
+
+    srv._clear_run_summary_cache()
+    _write_run(tmp_path, "run-a", iterations=[
+        {"i": 1, "final_e2e_status": "passed", "patch_hash": "aa",
+         "changed_files": ["x.py"], "attempts": 1},
+    ], audit_entries=[{"capability": "fs.read", "status": "ok"}])
+    _write_run(tmp_path, "run-b", iterations=[
+        {"i": 1, "final_e2e_status": "passed", "patch_hash": "bb",
+         "changed_files": ["y.py"], "attempts": 1},
+    ])
+    calls = {"n": 0}
+    original = srv._compute_run_summary_for_compare
+
+    def _spy(runs_dir: Path, task_id: str):
+        calls["n"] += 1
+        return original(runs_dir, task_id)
+
+    srv._compute_run_summary_for_compare = _spy
+    try:
+        with _server(tmp_path) as (port, _):
+            first = json.loads(_get(port, "/api/runs/run-a/compare/run-b")[1])
+            second = json.loads(_get(port, "/api/runs/run-a/compare/run-b")[1])
+    finally:
+        srv._compute_run_summary_for_compare = original
+
+    assert first == second
+    assert calls["n"] == 2  # cold compute for run-a and run-b, then both cached
+
+
+def test_run_summary_cache_invalidates_when_iteration_added(tmp_path: Path):
+    """A new ``iter-NNN`` directory must bump the signature so the next
+    compare load reflects the iteration count without a server restart."""
+    from harness.ui import server as srv
+
+    srv._clear_run_summary_cache()
+    run_dir = _write_run(tmp_path, "run-a", iterations=[
+        {"i": 1, "final_e2e_status": "failed", "patch_hash": "aa",
+         "changed_files": ["x.py"]},
+    ])
+    _write_run(tmp_path, "run-b", iterations=[
+        {"i": 1, "final_e2e_status": "passed", "patch_hash": "bb",
+         "changed_files": ["y.py"]},
+    ])
+    with _server(tmp_path) as (port, _):
+        before = json.loads(_get(port, "/api/runs/run-a/compare/run-b")[1])
+        assert before["a"]["iteration_count"] == 1
+        new_iter = run_dir / "iterations" / "iter-002"
+        new_iter.mkdir()
+        (new_iter / "manifest.json").write_text(json.dumps({
+            "iteration": 2,
+            "final_e2e_status": "passed",
+            "code": {"patch_hash": "cc", "changed_files": ["z.py"]},
+        }))
+        (new_iter / "validations").mkdir()
+        after = json.loads(_get(port, "/api/runs/run-a/compare/run-b")[1])
+        assert after["a"]["iteration_count"] == 2
+        assert after["a"]["iterations"][-1]["patch_hash"] == "cc"
+
+
+def test_run_summary_cache_invalidates_when_audit_grows(tmp_path: Path):
+    """Appending to ``capability_audit.jsonl`` changes its mtime+size,
+    so the cached audit rollup must refresh on the next compare load."""
+    from harness.ui import server as srv
+
+    srv._clear_run_summary_cache()
+    run_dir = _write_run(tmp_path, "run-a", iterations=[
+        {"i": 1, "final_e2e_status": "passed"},
+    ], audit_entries=[{"capability": "fs.read", "status": "ok"}])
+    _write_run(tmp_path, "run-b", iterations=[
+        {"i": 1, "final_e2e_status": "passed"},
+    ])
+    with _server(tmp_path) as (port, _):
+        before = json.loads(_get(port, "/api/runs/run-a/compare/run-b")[1])
+        assert before["a"]["audit"]["total"] == 1
+        audit_path = run_dir / "capability_audit.jsonl"
+        with audit_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"capability": "fs.write", "status": "denied"})
+                    + "\n")
+        after = json.loads(_get(port, "/api/runs/run-a/compare/run-b")[1])
+        assert after["a"]["audit"]["total"] == 2
+        assert after["a"]["audit"]["by_status"].get("denied") == 1
+
+
+def test_run_summary_cache_memoises_missing_run(tmp_path: Path):
+    """A not-yet-existing task id still memoises ``None`` so repeated
+    stale share-link loads don't keep calling ``show_run``."""
+    from harness.ui import server as srv
+
+    srv._clear_run_summary_cache()
+    _write_run(tmp_path, "run-a", iterations=[
+        {"i": 1, "final_e2e_status": "passed"},
+    ])
+    calls = {"n": 0}
+    original = srv._compute_run_summary_for_compare
+
+    def _spy(runs_dir: Path, task_id: str):
+        calls["n"] += 1
+        return original(runs_dir, task_id)
+
+    srv._compute_run_summary_for_compare = _spy
+    try:
+        with _server(tmp_path) as (port, _):
+            first = json.loads(
+                _get(port, "/api/runs/run-a/compare/missing-run")[1])
+            second = json.loads(
+                _get(port, "/api/runs/run-a/compare/missing-run")[1])
+    finally:
+        srv._compute_run_summary_for_compare = original
+
+    assert first["b"] is None and second["b"] is None
+    # 2 computes on the first call (a + missing), 0 on the second.
+    assert calls["n"] == 2
+
+
 def test_palette_exposes_compare_action(tmp_path: Path):
     """Cmd+K -> "compare two runs" must be reachable so users discover
     the cross-run diff without hunting through the sidebar."""
@@ -1444,6 +1689,84 @@ def test_trends_mount_listed_in_index_doc(tmp_path: Path):
         assert 'id="run-trends"' in body
 
 
+def test_trends_cache_skips_recompute_when_signature_unchanged(tmp_path: Path):
+    """A second call with no on-disk changes must hit the memo and not
+    re-walk the ledger. We verify by patching ``_compute_trends`` to
+    count invocations — once on a cold call, still once after a repeat
+    poll of the same ``runs_dir``."""
+    from harness.ui import server as srv
+
+    srv._clear_trends_cache()
+    _write_run(tmp_path, "r1", goal="a",
+               created="2026-05-20T10:00:00Z",
+               updated="2026-05-20T10:00:30Z")
+    _write_run(tmp_path, "r2", goal="a",
+               created="2026-05-20T11:00:00Z",
+               updated="2026-05-20T11:00:30Z")
+    calls = {"n": 0}
+    original = srv._compute_trends
+
+    def _spy(runs_dir: Path) -> dict:
+        calls["n"] += 1
+        return original(runs_dir)
+
+    srv._compute_trends = _spy
+    try:
+        with _server(tmp_path) as (port, _):
+            first = json.loads(_get(port, "/api/runs/trends")[1])
+            second = json.loads(_get(port, "/api/runs/trends")[1])
+    finally:
+        srv._compute_trends = original
+
+    assert calls["n"] == 1
+    assert first == second
+
+
+def test_trends_cache_invalidates_when_new_run_appears(tmp_path: Path):
+    """Dropping a fresh run dir under ``runs_dir`` bumps the cache
+    signature and forces a recompute so the new run shows up
+    immediately — no stale sidebar."""
+    from harness.ui import server as srv
+
+    srv._clear_trends_cache()
+    _write_run(tmp_path, "r1", goal="a",
+               created="2026-05-20T10:00:00Z",
+               updated="2026-05-20T10:00:30Z")
+    with _server(tmp_path) as (port, _):
+        before = json.loads(_get(port, "/api/runs/trends")[1])
+        assert before["total_runs"] == 1
+        _write_run(tmp_path, "r2", goal="a",
+                   created="2026-05-21T10:00:00Z",
+                   updated="2026-05-21T10:00:30Z")
+        after = json.loads(_get(port, "/api/runs/trends")[1])
+        assert after["total_runs"] == 2
+        only = next(b for b in after["buckets"] if b["key"] == "a")
+        assert only["stats"]["count"] == 2
+
+
+def test_trends_cache_invalidates_when_iteration_added(tmp_path: Path):
+    """Adding a new ``iter-NNN`` to an existing run must invalidate the
+    cache so the bucket's iteration count updates without a server
+    restart."""
+    from harness.ui import server as srv
+
+    srv._clear_trends_cache()
+    run_dir = _write_run(
+        tmp_path, "r1", goal="a",
+        created="2026-05-20T10:00:00Z",
+        updated="2026-05-20T10:00:30Z",
+        iterations=[{"i": 1, "final_e2e_status": "passed"}],
+    )
+    with _server(tmp_path) as (port, _):
+        before = json.loads(_get(port, "/api/runs/trends")[1])
+        bucket = next(b for b in before["buckets"] if b["key"] == "a")
+        assert bucket["series"][0]["iterations"] == 1
+        (run_dir / "iterations" / "iter-002").mkdir()
+        after = json.loads(_get(port, "/api/runs/trends")[1])
+        bucket2 = next(b for b in after["buckets"] if b["key"] == "a")
+        assert bucket2["series"][0]["iterations"] == 2
+
+
 # ----- /api/playbooks (per-repo overrides) ---------------------------------
 
 
@@ -1458,7 +1781,12 @@ def _post_text(port: int, path: str, text: str) -> tuple[int, dict]:
 
 def test_playbook_list_marks_overridden_and_reports_dir(tmp_path: Path):
     """The list endpoint tags repo overrides and tells the UI where saves
-    land, so the banner can show an honest path without guessing."""
+    land, so the banner can show an honest path without guessing.
+
+    It also surfaces the same metadata fields the CLI's
+    ``dev-loop playbooks ls`` prints (source label, line count, agent
+    phases), since both share ``harness.playbooks.list_playbooks``.
+    """
     with _server(tmp_path) as (port, _):
         status, body = _get(port, "/api/playbooks")
         assert status == 200
@@ -1466,8 +1794,19 @@ def test_playbook_list_marks_overridden_and_reports_dir(tmp_path: Path):
         assert isinstance(data["playbooks"], list)
         assert data["playbooks"], "built-in playbooks should be listed"
         for entry in data["playbooks"]:
-            assert set(entry.keys()) >= {"name", "overridden"}
+            assert set(entry.keys()) >= {
+                "name", "overridden", "source", "has_builtin",
+                "size_bytes", "line_count", "agent_phases",
+            }
             assert entry["overridden"] is False
+            assert entry["source"] == "built-in"
+        # Spot-check that phase bindings are propagated, so the UI picker
+        # can hint which playbook drives which agent step.
+        impl = next(
+            p for p in data["playbooks"]
+            if p["name"] == "implement_feature.v1.md"
+        )
+        assert set(impl["agent_phases"]) == {"implementation", "task_contract"}
         assert data["override_dir"] == ".dev-loop/playbooks"
 
 
@@ -1591,3 +1930,112 @@ def test_readonly_banners_present_in_index_doc(tmp_path: Path):
     # they can be edited — but the edits go to the repo.
     assert "Saves stay in this repo" in body
     assert "id=\"pb-override-path\"" in body
+
+
+def _seed_ai_call(
+    repo: Path, task_id: str, iteration: int, ordinal: int, phase: str,
+    *, metadata: dict | None = None, raw_log: str | None = None,
+    output: dict | None = None,
+) -> Path:
+    """Hand-build an ai_call dir so tests don't need a real loop run."""
+    base = (repo / ".dev-loop" / "runs" / task_id
+            / "iterations" / f"iter-{iteration:03d}" / "ai_calls"
+            / f"{ordinal:03d}_{phase}")
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "input.json").write_text(json.dumps({"i": ordinal}), encoding="utf-8")
+    (base / "output.json").write_text(
+        json.dumps(output or {"type": phase, "ok": True}), encoding="utf-8")
+    if metadata is not None:
+        (base / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    if raw_log is not None:
+        (base / "raw_provider_log.jsonl").write_text(raw_log, encoding="utf-8")
+    return base
+
+
+def test_ai_calls_endpoint_surfaces_provider_metadata(tmp_path: Path):
+    """``/api/runs/<task>/iteration/<n>/ai_calls`` returns one row per
+    recorded AI call, with provider/returncode/synthesized flags lifted
+    out of ``metadata.json`` so the Analyze tab can render diagnostic
+    pills without grepping ``raw_provider_log``."""
+    task_id = "20260521-abc-demo"
+    run_dir = tmp_path / ".dev-loop" / "runs" / task_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "task_manifest.json").write_text(
+        json.dumps({"task_id": task_id}), encoding="utf-8")
+    _seed_ai_call(
+        tmp_path, task_id, 1, 1, "implementation",
+        metadata={
+            "provider": "claude", "returncode": 0,
+            "stderr_tail": "", "argv": ["claude", "--headless"],
+            "ts_utc": "2026-05-21T00:00:00Z",
+        },
+        raw_log="line1\nline2\n",
+        output={"type": "implementation_result"},
+    )
+    _seed_ai_call(
+        tmp_path, task_id, 1, 11, "triage_attempt_1",
+        metadata={
+            "provider": "codex", "returncode": 2,
+            "stderr_tail": "boom\n", "argv": ["codex"],
+        },
+        output={"type": "failure_triage"},
+    )
+    _seed_ai_call(
+        tmp_path, task_id, 1, 11, "triage_attempt_1_harness_fallback",
+        metadata={"provider": "harness", "synthesized": True},
+        output={"type": "failure_triage"},
+    )
+    with _server(tmp_path) as (port, _):
+        status, body = _get(
+            port, f"/api/runs/{task_id}/iteration/1/ai_calls")
+        assert status == 200, body
+        data = json.loads(body)
+    calls = {c["name"]: c for c in data["calls"]}
+    impl = calls["001_implementation"]
+    assert impl["provider"] == "claude"
+    assert impl["returncode"] == 0
+    assert impl["phase"] == "implementation"
+    assert impl["ordinal"] == 1
+    assert impl["has_raw_log"] is True
+    assert impl["has_metadata"] is True
+    assert impl["synthesized"] is False
+    assert impl["output_type"] == "implementation_result"
+    triage = calls["011_triage_attempt_1"]
+    assert triage["provider"] == "codex"
+    assert triage["returncode"] == 2
+    assert triage["stderr_tail_len"] == len("boom\n")
+    fallback = calls["011_triage_attempt_1_harness_fallback"]
+    assert fallback["synthesized"] is True
+    assert fallback["provider"] == "harness"
+
+
+def test_ai_call_dump_returns_full_payload_and_rejects_traversal(tmp_path: Path):
+    """``/api/runs/<task>/iteration/<n>/ai_call/<id>`` returns input,
+    output, metadata and raw log. The ``<id>`` must match the canonical
+    ``NNN_phase`` shape; anything else (``..``, slashes, etc.) is
+    rejected without touching the filesystem."""
+    task_id = "20260521-def-demo"
+    run_dir = tmp_path / ".dev-loop" / "runs" / task_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "task_manifest.json").write_text(
+        json.dumps({"task_id": task_id}), encoding="utf-8")
+    _seed_ai_call(
+        tmp_path, task_id, 1, 1, "implementation",
+        metadata={"provider": "claude", "returncode": 0,
+                  "argv": ["claude"], "stderr_tail": "warn"},
+        raw_log="raw log body\n",
+    )
+    with _server(tmp_path) as (port, _):
+        status, body = _get(
+            port, f"/api/runs/{task_id}/iteration/1/ai_call/001_implementation")
+        assert status == 200, body
+        dump = json.loads(body)
+        assert dump["name"] == "001_implementation"
+        assert dump["metadata"]["provider"] == "claude"
+        assert dump["raw_provider_log"] == "raw log body\n"
+        assert dump["input"] == {"i": 1}
+        # Bogus id: must be refused at the validation layer (no file IO).
+        status, body = _get(
+            port, f"/api/runs/{task_id}/iteration/1/ai_call/..%2Fetc")
+        assert status == 200
+        assert json.loads(body)["_error"] == "invalid ai_call id"

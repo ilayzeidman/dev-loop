@@ -10,7 +10,9 @@ from harness.scenarios import (
     default_implementation_result,
     default_task_contract,
     dump_scenario_files,
+    list_scenarios,
     load_scenario_form,
+    show_scenario,
     validate_scenario_form,
 )
 
@@ -238,3 +240,78 @@ def test_dump_scenario_files_empty_request_omits_trailing_newline():
     f = _clean_form()
     f["task_request"] = ""
     assert dump_scenario_files(f)["task_request.md"] == ""
+
+
+# ---------------------------------------------------------------------------
+# list_scenarios / show_scenario
+
+
+def _materialize_scenario(
+    sc_dir: Path,
+    name: str,
+    *,
+    goal: str = "do it",
+    status: str = "passed",
+    suite: str = "demo-e2e",
+) -> Path:
+    """Round-trip a clean form through ``dump_scenario_files`` so the
+    fixture exactly matches what the UI/CLI write on save."""
+    form = _clean_form()
+    form["task_contract"]["implementation_goal"] = goal
+    form["e2e_result"]["status"] = status
+    form["e2e_result"]["test_suite"] = suite
+    d = sc_dir / name
+    d.mkdir(parents=True, exist_ok=True)
+    for fname, text in dump_scenario_files(form).items():
+        (d / fname).write_text(text, encoding="utf-8")
+    return d
+
+
+def test_list_scenarios_returns_empty_when_dir_missing(tmp_path: Path):
+    assert list_scenarios(tmp_path / "does-not-exist") == []
+
+
+def test_list_scenarios_skips_files_and_sorts_dirs(tmp_path: Path):
+    sd = tmp_path / "scenarios"
+    sd.mkdir()
+    _materialize_scenario(sd, "zeta", goal="z")
+    _materialize_scenario(sd, "alpha", goal="a")
+    # A stray file at the top level should be ignored.
+    (sd / "README.md").write_text("hi")
+    rows = list_scenarios(sd)
+    assert [r["name"] for r in rows] == ["alpha", "zeta"]
+    assert rows[0]["goal"] == "a"
+    assert rows[0]["valid"] is True
+
+
+def test_list_scenarios_flags_lint_issues(tmp_path: Path):
+    sd = tmp_path / "scenarios"
+    sd.mkdir()
+    _materialize_scenario(sd, "good", goal="ok")
+    _materialize_scenario(sd, "bad", goal="")  # missing goal -> error
+    rows = {r["name"]: r for r in list_scenarios(sd)}
+    assert rows["good"]["valid"] is True
+    assert rows["good"]["n_errors"] == 0
+    assert rows["bad"]["valid"] is False
+    assert rows["bad"]["n_errors"] >= 1
+
+
+def test_show_scenario_returns_none_for_missing(tmp_path: Path):
+    sd = tmp_path / "scenarios"
+    sd.mkdir()
+    assert show_scenario(sd, "ghost") is None
+
+
+def test_show_scenario_includes_task_request_and_issues(tmp_path: Path):
+    sd = tmp_path / "scenarios"
+    sd.mkdir()
+    _materialize_scenario(sd, "demo", goal="implement demo")
+    (sd / "demo" / "task_request.md").write_text("# demo\nDo a thing.\n")
+    detail = show_scenario(sd, "demo")
+    assert detail is not None
+    assert detail["name"] == "demo"
+    assert detail["goal"] == "implement demo"
+    assert "Do a thing." in detail["task_request"]
+    # Clean scenario has no error-level issues.
+    assert not any(i["level"] == "error" for i in detail["issues"])
+    assert "other_files" in detail

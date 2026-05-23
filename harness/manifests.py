@@ -127,6 +127,7 @@ class TaskLedger:
         input_obj: dict[str, Any],
         output_obj: dict[str, Any],
         raw_provider_log: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> Path:
         d = self.iteration_dir(iteration) / "ai_calls" / f"{ordinal:03d}_{phase}"
         d.mkdir(parents=True, exist_ok=True)
@@ -134,4 +135,6 @@ class TaskLedger:
         write_json(d / "output.json", output_obj)
         if raw_provider_log is not None:
             write_text(d / "raw_provider_log.jsonl", raw_provider_log)
+        if metadata:
+            write_json(d / "metadata.json", metadata)
         return d

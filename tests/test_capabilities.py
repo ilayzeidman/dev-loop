@@ -164,6 +164,68 @@ def test_audit_jsonl_sink_is_thread_safe_for_large_records(tmp_path):
         assert rec["payload"] == big
 
 
+def test_list_capabilities_groups_and_serializes_specs():
+    """``list_capabilities`` is the single source of truth for the
+    ``capabilities ls`` CLI and ``/api/capabilities``. It must (a) cover
+    every name in the registry, (b) sort by (category, name), and
+    (c) report ``has_impl`` so callers can flag broken specs."""
+    from harness.capabilities import list_capabilities
+
+    rows = list_capabilities()
+    names = {r["name"] for r in rows}
+    assert "trigger_dev_jenkins_build" in names
+    assert "query_elastic_for_current_run" in names
+
+    keys = [(r["category"], r["name"]) for r in rows]
+    assert keys == sorted(keys), "rows must be sorted by (category, name)"
+
+    expected = {
+        "name", "category", "agent_requestable", "timeout_seconds",
+        "uses_run_manifest", "redacts_output", "audit", "prod_possible",
+        "forced_params", "has_impl",
+    }
+    for r in rows:
+        assert expected.issubset(r.keys()), r
+        assert r["has_impl"] is True, f"built-in registry should bind {r['name']}"
+
+
+def test_show_capability_returns_none_for_unknown_name():
+    from harness.capabilities import show_capability
+
+    assert show_capability("does_not_exist") is None
+    d = show_capability("trigger_dev_jenkins_build")
+    assert d is not None
+    assert d["category"] == "real_dev_internal"
+    assert d["forced_params"]["environment"] == "dev"
+
+
+def test_list_capabilities_flags_unbound_impl():
+    """A spec declared in yaml but missing an impl must be reported
+    via ``has_impl: False`` so introspection surfaces flag the gap."""
+    from harness.capabilities import list_capabilities
+    from harness.capabilities.registry import CapabilityRegistry, CapabilitySpec
+
+    reg = CapabilityRegistry()
+    reg._specs["dangling"] = CapabilitySpec(
+        name="dangling", category="local_only", agent_requestable=False,
+        timeout_seconds=60, uses_run_manifest=False, redacts_output=False,
+        audit=False, prod_possible=False, forced_params={}, impl=None,
+    )
+    rows = list_capabilities(registry=reg)
+    assert rows == [{
+        "name": "dangling",
+        "category": "local_only",
+        "agent_requestable": False,
+        "timeout_seconds": 60,
+        "uses_run_manifest": False,
+        "redacts_output": False,
+        "audit": False,
+        "prod_possible": False,
+        "forced_params": {},
+        "has_impl": False,
+    }]
+
+
 def test_soft_timeout_warning_tolerates_non_dict_data():
     """A capability impl that returns ``data=None`` (e.g. ``CapabilityResult(
     status='error', data=None, error=...)``) must not crash the registry's

@@ -246,6 +246,12 @@ runs/
         agent_response.json
         patch.diff
         changed_files.json
+        ai_calls/
+          001_implementation/
+            input.json
+            output.json
+            raw_provider_log.jsonl
+            metadata.json
         validations/
           attempt-001/
             jenkins_build.json
@@ -267,6 +273,12 @@ runs/
 ```
 
 The top-level `task_manifest.json` is the mutable index. Each iteration manifest is immutable once the iteration completes.
+
+Per-AI-call `metadata.json` carries the provider invocation envelope
+(`provider`, `returncode`, `argv`, `stderr_tail`, optional warnings) so
+the CLI (`dev-loop runs show --json`) and the Analyze tab's AI-call
+drilldown render identical provider telemetry without re-parsing the
+raw provider log.
 
 ## 9. Run Manifest
 
@@ -327,6 +339,27 @@ The manifest is the source of truth for correlating:
 - GPU and node identity.
 
 The agent should not provide these identifiers manually. Diagnostic capabilities derive them from the manifest.
+
+### 9.1 Ledger invariants
+
+The top-level `task_manifest.json` is always finalized, even when the
+process dies. The orchestrator wraps each iteration (and the upstream
+task-contract phase) in a guard that, on `KeyboardInterrupt` /
+`SIGINT` or unhandled exception, writes `status: aborted`,
+`final_status: failed_inconclusive`, and `interrupted: true` before
+re-raising the signal (the CLI then exits 130). Listings and the
+Analyze tab collapse the two surfaces into a single `effective_status`
+bucket so a killed run is never indistinguishable from one that is
+still executing:
+
+- `final_status` when the run reached the report writer.
+- `aborted` for a mid-flight status (`initialized`, `contract_ready`,
+  `stopped`) — the process died before the loop finished.
+- Otherwise the raw `status`.
+
+The `interrupted` flag is surfaced verbatim by `dev-loop runs ls /
+show` and by the Analyze tab so reviewers can distinguish a SIGINT
+abort from a contract-phase crash.
 
 ## 10. Failure Dossier and Diagnostics
 
@@ -736,11 +769,20 @@ iterations/
         input.json
         output.json
         raw_provider_log.jsonl
+        metadata.json
       002_failure_triage/
         input.json
         output.json
         raw_provider_log.jsonl
+        metadata.json
 ```
+
+`metadata.json` is written by the provider adapter (`CliAgentRunner`)
+and captures the structured invocation envelope (`provider`,
+`returncode`, `argv`, `stderr_tail`, warnings). The same record is
+re-exposed by `harness.runs.iteration_ai_calls` / `ai_call_rollup` and
+by `GET /ai_calls`, so CLI and UI consumers see identical provider
+telemetry without re-parsing the raw log.
 
 Do not rely on Claude/Codex remembering previous turns.
 

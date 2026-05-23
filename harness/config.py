@@ -184,6 +184,32 @@ class HarnessConfig:
             raise ValueError(f"{path} must contain a YAML mapping at the top level")
         return cls.from_dict(raw)
 
+    @classmethod
+    def load_with_issues(
+        cls, *, repo_root: Path, explicit_path: Path | None = None,
+    ) -> tuple["HarnessConfig", Path | None, list[dict[str, str]]]:
+        """Same as ``load`` but also returns the resolved config-file path
+        and the structured issue list from ``from_dict_with_issues``.
+
+        Returns ``(config, path_or_None, issues)``. ``path_or_None`` is
+        the YAML file that was read, or ``None`` if defaults were used.
+        ``issues`` is ``[]`` for a clean (or absent) config.
+        """
+        path = _resolve_config_path(repo_root, explicit_path)
+        if path is None or not path.exists():
+            return cls(), None, []
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if not isinstance(raw, dict):
+            return cls(), path, [{
+                "level": "error", "field": "<root>",
+                "message": (
+                    f"{path} must contain a YAML mapping at the top level; "
+                    f"got {type(raw).__name__}"
+                ),
+            }]
+        cfg, issues = cls.from_dict_with_issues(raw)
+        return cfg, path, issues
+
     def resolved(self, repo_root: Path) -> "ResolvedConfig":
         import tempfile
 

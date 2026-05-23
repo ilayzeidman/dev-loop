@@ -96,10 +96,61 @@ function renderOnboarding() {
     ? "Run the bundled hello-dev-loop scenario end-to-end"
     : "Install the starter scenario first";
 
+  renderOnboardingDoctor(o.diagnostics);
+
   // Only show the panel while there's something useful to do or to
   // celebrate; once the user has runs recorded we get out of the way.
   const shouldShow = !o.is_complete || o.run_count === 0;
   panel.classList.toggle("hidden", !shouldShow);
+}
+
+// Render the doctor block. `diag` is `{checks: [...], summary: {...}}` or
+// nullish (older servers). Mirrors `dev-loop doctor` so the UI and CLI
+// agree byte-for-byte on what's broken.
+function renderOnboardingDoctor(diag) {
+  const wrap = $("#onboarding-doctor-wrap");
+  const list = $("#onboarding-doctor-list");
+  const summaryEl = $("#onboarding-doctor-summary");
+  if (!diag || !Array.isArray(diag.checks)) {
+    wrap.classList.add("hidden");
+    return;
+  }
+  wrap.classList.remove("hidden");
+  const s = diag.summary || {};
+  const ok = s.ok || 0, warn = s.warning || 0, err = s.error || 0;
+  const tone = err ? "err" : (warn ? "warn" : "ok");
+  summaryEl.className = `doctor-pill doctor-pill-${tone}`;
+  summaryEl.textContent = err
+    ? `${err} error${err === 1 ? "" : "s"}, ${warn} warn, ${ok} ok`
+    : warn
+      ? `${warn} warning${warn === 1 ? "" : "s"}, ${ok} ok`
+      : `all ${ok} check${ok === 1 ? "" : "s"} ok`;
+  list.innerHTML = diag.checks.map(c => `
+    <li class="doctor-check doctor-${escapeHtml(c.level)}">
+      <span class="doctor-mark" aria-hidden="true">${{
+        "ok": "✓", "warning": "!", "error": "x",
+      }[c.level] || "?"}</span>
+      <span class="doctor-body">
+        <span class="doctor-label">${escapeHtml(c.label)}</span>
+        <span class="doctor-msg">${escapeHtml(c.message)}</span>
+        ${c.hint ? `<span class="doctor-hint">hint: ${escapeHtml(c.hint)}</span>` : ""}
+      </span>
+    </li>`).join("");
+  // Auto-open the details when something needs attention so the user
+  // doesn't have to hunt for the warning.
+  if (err || warn) wrap.open = true;
+}
+
+async function refreshOnboardingDoctor() {
+  const status = $("#onboarding-doctor-status");
+  status.textContent = "checking…";
+  try {
+    const diag = await getJSON("/api/doctor");
+    renderOnboardingDoctor(diag);
+    status.textContent = "";
+  } catch (e) {
+    status.textContent = "error: " + e;
+  }
 }
 
 async function runOnboardingInit() {
@@ -138,6 +189,7 @@ async function runOnboardingDemo() {
 
 $("#onboarding-init").addEventListener("click", runOnboardingInit);
 $("#onboarding-demo").addEventListener("click", runOnboardingDemo);
+$("#onboarding-doctor-refresh").addEventListener("click", refreshOnboardingDoctor);
 
 (async () => {
   try { await loadConfig(); }
@@ -510,6 +562,7 @@ let SC_CURRENT = null;      // {name, task_request, task_contract, ..., extras, 
 let SC_LOADED_JSON = null;  // stringified snapshot for dirty comparison
 let SC_VALIDATE_TIMER = null;
 let SC_NAME = null;
+let SC_HEALTH_BY_NAME = {};  // name -> {valid, n_errors, n_warnings, e2e_status}
 const SC_LIST_FIELDS = [
   "task_contract.success_criteria",
   "task_contract.assumptions",
@@ -527,9 +580,10 @@ async function refreshBuildScenarios() {
   const scenarios = data.scenarios || [];
   const scenariosDir = data.scenarios_dir || "scenarios/";
   $("#sc-new-name-hint").textContent = scenariosDir + "/";
+  SC_HEALTH_BY_NAME = Object.fromEntries(scenarios.map(s => [s.name, s]));
   const sel = $("#sc-select");
   sel.innerHTML = scenarios.map(
-    s => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}</option>`,
+    s => `<option value="${escapeHtml(s.name)}">${escapeHtml(scenarioOptionLabel(s))}</option>`,
   ).join("");
   const empty = scenarios.length === 0;
   $("#sc-empty").classList.toggle("hidden", !empty);
@@ -541,12 +595,46 @@ async function refreshBuildScenarios() {
   if (empty) {
     $("#sc-path").textContent = "";
     $("#sc-issues").classList.add("hidden");
+    renderScHealth(null);
     return;
   }
   const want = SC_NAME && scenarios.some(s => s.name === SC_NAME)
     ? SC_NAME : scenarios[0].name;
   sel.value = want;
   await loadScenario(want);
+}
+
+// Mirror of the CLI's ``dev-loop scenarios ls`` row formatting so the
+// picker reveals broken scenarios without an extra round-trip.
+function scenarioOptionLabel(s) {
+  const bits = [s.name];
+  if (s.e2e_status === "failed") bits.push("[failed e2e]");
+  if (s.n_errors) bits.push(`(${s.n_errors} err${s.n_errors === 1 ? "" : "s"})`);
+  else if (s.n_warnings) bits.push(`(${s.n_warnings} warn${s.n_warnings === 1 ? "" : "s"})`);
+  return bits.join(" ");
+}
+
+function renderScHealth(summary) {
+  const host = $("#sc-health");
+  if (!host) return;
+  if (!summary) { host.innerHTML = ""; host.classList.add("hidden"); return; }
+  const parts = [];
+  if (summary.n_errors) {
+    parts.push(`<span class="pill fail" title="Lint errors block runs">` +
+      `${summary.n_errors} error${summary.n_errors === 1 ? "" : "s"}</span>`);
+  } else if (summary.n_warnings) {
+    parts.push(`<span class="pill warn" title="Lint warnings">` +
+      `${summary.n_warnings} warning${summary.n_warnings === 1 ? "" : "s"}</span>`);
+  } else if (summary.valid) {
+    parts.push(`<span class="pill pass" title="No lint issues">lint clean</span>`);
+  }
+  if (summary.e2e_status === "passed") {
+    parts.push(`<span class="pill pass" title="Canned e2e status">e2e: passed</span>`);
+  } else if (summary.e2e_status === "failed") {
+    parts.push(`<span class="pill fail" title="Canned e2e status">e2e: failed</span>`);
+  }
+  host.innerHTML = parts.join(" ");
+  host.classList.toggle("hidden", parts.length === 0);
 }
 
 async function loadScenario(name) {
@@ -558,6 +646,7 @@ async function loadScenario(name) {
   $("#sc-path").textContent = data.path;
   populateScenarioForm(SC_CURRENT);
   renderScenarioIssues(data.issues || []);
+  renderScHealth(SC_HEALTH_BY_NAME[name] || null);
   setScDirty(false);
   $("#sc-status").textContent = "";
   // Default to form view on every load so a switch between scenarios
@@ -1282,7 +1371,8 @@ async function refreshRunTab() {
 async function refreshScenariosForLaunch() {
   const {scenarios} = await getJSON("/api/scenarios");
   $("#impl-scenario").innerHTML = scenarios.map(
-    s => `<option value="${s.name}">${s.name}</option>`).join("");
+    s => `<option value="${escapeHtml(s.name)}">${escapeHtml(scenarioOptionLabel(s))}</option>`,
+  ).join("");
   $("#impl-scenario-row").style.display =
     $("#impl-provider").value === "replay" ? "" : "none";
   const empty = scenarios.length === 0;
@@ -1368,6 +1458,13 @@ async function pollJob() {
 
 let CURRENT_TASK = null;
 let RUNS_CACHE = [];
+// Server-side pagination: the Analyze tab loads runs in newest-first
+// pages so a ledger with thousands of task ids doesn't block the tab
+// for seconds. ``RUNS_TOTAL`` is the canonical count from the server;
+// ``Load more`` appends the next page into ``RUNS_CACHE``.
+const RUNS_PAGE_SIZE = 50;
+let RUNS_TOTAL = 0;
+let RUNS_LOADING_MORE = false;
 let RUN_FILTER = "";
 let TRENDS_CACHE = {buckets: [], ungrouped_count: 0, total_runs: 0};
 let TRENDS_COLLAPSED = false;
@@ -1375,14 +1472,36 @@ let TRENDS_COMPARE_PICK = null;  // first task_id when shift-clicking a 2nd poin
 
 async function refreshAnalyzeTab() {
   const [runsRes, trendsRes] = await Promise.all([
-    getJSON("/api/runs"),
+    getJSON("/api/runs?limit=" + RUNS_PAGE_SIZE + "&offset=0"),
     getJSON("/api/runs/trends").catch(() => (
       {buckets: [], ungrouped_count: 0, total_runs: 0})),
   ]);
   RUNS_CACHE = runsRes.runs;
+  RUNS_TOTAL = (runsRes.pagination && typeof runsRes.pagination.total === "number")
+    ? runsRes.pagination.total : RUNS_CACHE.length;
   TRENDS_CACHE = trendsRes;
   renderTrends();
   renderRunList();
+}
+
+async function loadMoreRuns() {
+  if (RUNS_LOADING_MORE || RUNS_CACHE.length >= RUNS_TOTAL) return;
+  RUNS_LOADING_MORE = true;
+  renderRunList();
+  try {
+    const res = await getJSON(
+      "/api/runs?limit=" + RUNS_PAGE_SIZE + "&offset=" + RUNS_CACHE.length);
+    const known = new Set(RUNS_CACHE.map(r => r.task_id));
+    for (const r of res.runs) {
+      if (!known.has(r.task_id)) RUNS_CACHE.push(r);
+    }
+    if (res.pagination && typeof res.pagination.total === "number") {
+      RUNS_TOTAL = res.pagination.total;
+    }
+  } finally {
+    RUNS_LOADING_MORE = false;
+    renderRunList();
+  }
 }
 
 function renderTrends() {
@@ -1552,6 +1671,7 @@ function renderRunList() {
         (r.final_status || r.status || "").toLowerCase().includes(q))
     : all;
 
+  const hasMore = RUNS_CACHE.length < RUNS_TOTAL;
   const tally = $("#run-tally");
   if (!all.length) {
     tally.innerHTML = "";
@@ -1559,11 +1679,18 @@ function renderRunList() {
     const pass = all.filter(r => r.final_status === "passed").length;
     const fail = all.filter(r => isFailed(r.final_status || r.status)).length;
     const other = all.length - pass - fail;
+    const filterTxt = q
+      ? `<span class="muted">· showing ${filtered.length}/${all.length}</span>`
+      : "";
+    const pageTxt = hasMore
+      ? `<span class="muted">· loaded ${all.length} of ${RUNS_TOTAL}</span>`
+      : "";
     tally.innerHTML = `
       <span class="pill pass">${pass} passed</span>
       <span class="pill fail">${fail} failed</span>
       ${other ? `<span class="pill">${other} other</span>` : ""}
-      ${q ? `<span class="muted">· showing ${filtered.length}/${all.length}</span>` : ""}
+      ${filterTxt}
+      ${pageTxt}
     `;
   }
 
@@ -1613,9 +1740,29 @@ function renderRunList() {
         </li>`);
     }
   }
+  if (hasMore && !q) {
+    const remaining = RUNS_TOTAL - RUNS_CACHE.length;
+    const label = RUNS_LOADING_MORE
+      ? "loading…"
+      : `Load ${Math.min(RUNS_PAGE_SIZE, remaining)} more (${remaining} remaining)`;
+    html.push(`
+      <li class="run-load-more">
+        <button type="button" id="run-load-more-btn"
+                ${RUNS_LOADING_MORE ? "disabled" : ""}
+                aria-label="Load more runs">${escapeHtml(label)}</button>
+      </li>`);
+  } else if (hasMore && q) {
+    html.push(`
+      <li class="muted run-load-more-hint">
+        ${RUNS_TOTAL - RUNS_CACHE.length} older runs not yet loaded —
+        clear the filter to page through them.
+      </li>`);
+  }
   list.innerHTML = html.join("");
   $$("#run-list li[data-id]").forEach(li =>
     li.addEventListener("click", () => onRunListClick(li.dataset.id)));
+  const moreBtn = $("#run-load-more-btn");
+  if (moreBtn) moreBtn.addEventListener("click", () => loadMoreRuns());
 }
 
 function onRunListClick(taskId) {
@@ -1774,7 +1921,11 @@ async function loadIterations(taskId, tm, runMeta) {
   for (let i = 1; i <= total; i++) {
     const im = await getJSON(`/api/runs/${encodeURIComponent(taskId)}/iteration/${i}`);
     const att = await getJSON(`/api/runs/${encodeURIComponent(taskId)}/iteration/${i}/attempts`);
-    iterDocs.push({i, im, att});
+    let ai = {calls: []};
+    try {
+      ai = await getJSON(`/api/runs/${encodeURIComponent(taskId)}/iteration/${i}/ai_calls`);
+    } catch (_) { /* older runs may not have ai_calls; tolerate gracefully */ }
+    iterDocs.push({i, im, att, ai});
   }
 
   const timeline = document.createElement("div");
@@ -1796,7 +1947,7 @@ async function loadIterations(taskId, tm, runMeta) {
       if (tgt) tgt.scrollIntoView({behavior: "smooth", block: "start"});
     }));
 
-  for (const {i, im, att} of iterDocs) {
+  for (const {i, im, att, ai} of iterDocs) {
     const block = document.createElement("div");
     block.className = "iter";
     block.setAttribute("data-iter-block", String(i));
@@ -1807,6 +1958,7 @@ async function loadIterations(taskId, tm, runMeta) {
     const hypothesis = (im.agent_output || {}).hypothesis || "";
     const changed = (im.code || {}).changed_files || [];
     const hash = (im.code || {}).patch_hash || "";
+    const aiCalls = (ai && ai.calls) || [];
     block.innerHTML = `
       <h3>
         Iteration ${i}
@@ -1840,6 +1992,34 @@ async function loadIterations(taskId, tm, runMeta) {
             <div class="attempt-body" data-attempt-detail="${i}-${idx + 1}"></div>
           </div>`).join("")}
       </div>
+      ${aiCalls.length ? `
+      <details class="ai-calls">
+        <summary>
+          AI calls
+          <span class="muted">(${aiCalls.length})</span>
+          ${aiCalls.some(c => c.returncode != null && c.returncode !== 0)
+            ? '<span class="pill fail">non-zero exit</span>' : ""}
+          ${aiCalls.some(c => c.synthesized)
+            ? '<span class="pill warn">harness fallback</span>' : ""}
+        </summary>
+        <div class="ai-call-list">
+          ${aiCalls.map(c => `
+            <div class="ai-call ${c.returncode != null && c.returncode !== 0 ? "fail" : ""} ${c.synthesized ? "synth" : ""}">
+              <div class="ai-call-head">
+                <code>${escapeHtml(c.name)}</code>
+                <span class="pill ${c.synthesized ? "warn" : "info"}">${escapeHtml(c.provider || (c.synthesized ? "harness" : "unknown"))}</span>
+                ${c.returncode != null
+                  ? `<span class="pill ${c.returncode === 0 ? "pass" : "fail"}">rc ${c.returncode}</span>`
+                  : ""}
+                ${c.output_type ? `<span class="muted">→ <code>${escapeHtml(c.output_type)}</code></span>` : ""}
+                ${c.ts_utc ? `<span class="muted" title="${escapeAttr(c.ts_utc)}">${escapeHtml((c.ts_utc || "").replace("T", " ").replace("Z", ""))}</span>` : ""}
+                <button class="secondary" data-action="ai_call"
+                  data-iter="${i}" data-name="${escapeAttr(c.name)}">drill in</button>
+              </div>
+              <div class="ai-call-body" data-ai-call-detail="${i}-${escapeAttr(c.name)}"></div>
+            </div>`).join("")}
+        </div>
+      </details>` : ""}
     `;
     root.appendChild(block);
   }
@@ -1877,8 +2057,73 @@ async function loadIterations(taskId, tm, runMeta) {
         : '<p class="muted">no artifacts for this attempt</p>';
       tgt.dataset.loaded = "1";
       b.textContent = "hide";
+    } else if (b.dataset.action === "ai_call") {
+      const name = b.dataset.name;
+      const tgt = document.querySelector(
+        `[data-ai-call-detail="${i}-${CSS.escape(name)}"]`);
+      if (!tgt) return;
+      if (tgt.dataset.loaded) {
+        tgt.innerHTML = ""; tgt.dataset.loaded = "";
+        b.textContent = "drill in";
+        return;
+      }
+      const dump = await getJSON(
+        `/api/runs/${encodeURIComponent(taskId)}/iteration/${i}` +
+        `/ai_call/${encodeURIComponent(name)}`);
+      tgt.innerHTML = renderAiCallDetail(dump);
+      tgt.dataset.loaded = "1";
+      b.textContent = "hide";
     }
   }));
+}
+
+function renderAiCallDetail(dump) {
+  if (!dump || dump._error) {
+    return `<p class="muted">${escapeHtml((dump && dump._error) || "no detail")}</p>`;
+  }
+  const meta = dump.metadata || {};
+  const parts = [];
+  if (Object.keys(meta).length) {
+    const rows = [];
+    if (meta.provider) rows.push(["provider", meta.provider]);
+    if (meta.returncode != null) rows.push(["returncode", String(meta.returncode)]);
+    if (meta.ts_utc) rows.push(["ts_utc", meta.ts_utc]);
+    if (meta.synthesized) rows.push(["synthesized", "yes"]);
+    if (Array.isArray(meta.argv) && meta.argv.length) {
+      rows.push(["argv", meta.argv.join(" ")]);
+    }
+    parts.push(`<table class="ai-call-meta">
+      ${rows.map(([k, v]) =>
+        `<tr><th>${escapeHtml(k)}</th><td><code>${escapeHtml(v)}</code></td></tr>`).join("")}
+    </table>`);
+    if (meta.stderr_tail) {
+      parts.push(`<details class="file-section" open>
+        <summary><strong>stderr (tail)</strong></summary>
+        <pre>${escapeHtml(meta.stderr_tail)}</pre>
+      </details>`);
+    }
+  } else {
+    parts.push('<p class="muted">no provider metadata recorded</p>');
+  }
+  if (dump.output) {
+    parts.push(`<details class="file-section">
+      <summary><strong>output.json</strong></summary>
+      <pre>${escapeHtml(JSON.stringify(dump.output, null, 2))}</pre>
+    </details>`);
+  }
+  if (dump.input) {
+    parts.push(`<details class="file-section">
+      <summary><strong>input.json</strong></summary>
+      <pre>${escapeHtml(JSON.stringify(dump.input, null, 2))}</pre>
+    </details>`);
+  }
+  if (dump.raw_provider_log) {
+    parts.push(`<details class="file-section">
+      <summary><strong>raw_provider_log.jsonl</strong></summary>
+      <pre>${escapeHtml(dump.raw_provider_log)}</pre>
+    </details>`);
+  }
+  return parts.join("");
 }
 
 // ----- Compare two runs -------------------------------------------------

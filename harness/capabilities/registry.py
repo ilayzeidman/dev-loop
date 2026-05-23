@@ -211,6 +211,56 @@ def load_default_registry(impls_module: str = "harness.capabilities.impls") -> C
     return reg
 
 
+def spec_to_dict(spec: CapabilitySpec) -> dict[str, Any]:
+    """Serialize a ``CapabilitySpec`` to the plain dict shape both the CLI
+    and the ``/api/capabilities`` endpoint share.
+
+    Excludes ``impl`` (which is an opaque ``Capability`` instance, not
+    JSON-friendly) but includes a boolean ``has_impl`` so introspection
+    surfaces can flag capabilities declared in ``registry.yaml`` without
+    a wired implementation — a class of breakage that would otherwise
+    only show up at invoke time.
+    """
+    return {
+        "name": spec.name,
+        "category": spec.category,
+        "agent_requestable": spec.agent_requestable,
+        "timeout_seconds": spec.timeout_seconds,
+        "uses_run_manifest": spec.uses_run_manifest,
+        "redacts_output": spec.redacts_output,
+        "audit": spec.audit,
+        "prod_possible": spec.prod_possible,
+        "forced_params": dict(spec.forced_params),
+        "has_impl": spec.impl is not None,
+    }
+
+
+def list_capabilities(
+    registry: CapabilityRegistry | None = None,
+) -> list[dict[str, Any]]:
+    """Return every capability spec as a dict, sorted by (category, name).
+
+    Pass an explicit ``registry`` to introspect a non-default one; the
+    default loads built-ins via :func:`load_default_registry`.
+    """
+    reg = registry if registry is not None else load_default_registry()
+    rows = [spec_to_dict(reg.spec(n)) for n in reg.all_names()]
+    rows.sort(key=lambda r: (r["category"], r["name"]))
+    return rows
+
+
+def show_capability(
+    name: str, *, registry: CapabilityRegistry | None = None,
+) -> dict[str, Any] | None:
+    """Return one capability's spec dict, or ``None`` if not registered."""
+    reg = registry if registry is not None else load_default_registry()
+    try:
+        spec = reg.spec(name)
+    except KeyError:
+        return None
+    return spec_to_dict(spec)
+
+
 def audit_to_jsonl(path: Path) -> Callable[[dict[str, Any]], None]:
     """Return an audit sink that appends JSONL records to ``path``.
 

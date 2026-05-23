@@ -113,6 +113,22 @@
             <label><input type="checkbox" id="onboarding-starter" checked>
               install starter scenario</label>
           </details>
+          <details class="onboarding-advanced" id="onboarding-doctor-wrap">
+            <summary>
+              Diagnostics
+              <span id="onboarding-doctor-summary" class="muted"></span>
+            </summary>
+            <p class="muted">
+              Same checks as <code>dev-loop doctor</code>. Each item shows
+              a one-line fix hint when something needs attention.
+            </p>
+            <ul class="doctor-checks" id="onboarding-doctor-list"></ul>
+            <div class="row" style="margin-top: 0.4em;">
+              <button id="onboarding-doctor-refresh" class="secondary">
+                Re-run checks</button>
+              <span id="onboarding-doctor-status" class="muted"></span>
+            </div>
+          </details>
         </div>
 
         <div class="panel" id="builder-overview">
@@ -360,6 +376,8 @@
             <button id="sc-new-toggle" class="secondary">+ new scenario</button>
             <button id="sc-run" title="Launch /implement against this scenario"
               aria-label="Run this scenario">Run this scenario</button>
+            <span id="sc-health" class="sc-health hidden"
+              aria-label="Lint status for the selected scenario"></span>
             <span id="sc-dirty-pill" class="muted"></span>
           </div>
 

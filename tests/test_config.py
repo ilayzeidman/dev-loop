@@ -113,6 +113,33 @@ def test_from_dict_with_issues_flags_zero_iterations():
     )
 
 
+def test_load_with_issues_returns_path_and_issues(tmp_path: Path):
+    cd = tmp_path / CONFIG_DIR_NAME
+    cd.mkdir()
+    (cd / CONFIG_FILE_NAME).write_text("totally_unknown_thing: 1\n")
+    cfg, path, issues = HarnessConfig.load_with_issues(repo_root=tmp_path)
+    assert path == cd / CONFIG_FILE_NAME
+    assert any(i["field"] == "totally_unknown_thing" for i in issues)
+    assert cfg.default_provider == "replay"
+
+
+def test_load_with_issues_returns_none_path_when_no_file(tmp_path: Path):
+    cfg, path, issues = HarnessConfig.load_with_issues(repo_root=tmp_path)
+    assert path is None
+    assert issues == []
+    assert cfg.default_provider == "replay"
+
+
+def test_load_with_issues_non_mapping_top_level(tmp_path: Path):
+    cd = tmp_path / CONFIG_DIR_NAME
+    cd.mkdir()
+    (cd / CONFIG_FILE_NAME).write_text("- just a list\n- not a mapping\n")
+    cfg, path, issues = HarnessConfig.load_with_issues(repo_root=tmp_path)
+    assert path == cd / CONFIG_FILE_NAME
+    assert any(i["level"] == "error" and i["field"] == "<root>" for i in issues)
+    assert cfg.default_provider == "replay"  # defaults preserved
+
+
 def test_from_dict_with_issues_clean_config():
     _, issues = HarnessConfig.from_dict_with_issues({
         "default_provider": "claude",

@@ -6,7 +6,9 @@ Read endpoints
   GET  /api/config                       resolved config
   GET  /api/config/raw                   raw config.yaml text
   GET  /api/onboarding                   first-run setup checklist
+  GET  /api/doctor                       repo diagnostics (delegates to dev-loop doctor)
   GET  /api/runs                         list of task runs + active jobs
+                                         (?limit=&offset= paginate; default: full ledger)
   GET  /api/runs/trends                  per-goal trend buckets + sparkline data
   GET  /api/runs/<task-id>               task manifest
   GET  /api/runs/<task-id>/report        rendered Markdown report
@@ -16,6 +18,8 @@ Read endpoints
   GET  /api/runs/<task-id>/iteration/<n>/patch  patch diff text
   GET  /api/runs/<task-id>/iteration/<n>/attempts iteration attempts overview
   GET  /api/runs/<task-id>/iteration/<n>/attempt/<a>  full attempt artifact tree
+  GET  /api/runs/<task-id>/iteration/<n>/ai_calls  AI calls recorded for one iter
+  GET  /api/runs/<task-id>/iteration/<n>/ai_call/<id>  one AI call's full payload
   GET  /api/runs/<a>/compare/<b>         side-by-side summary of two runs
   GET  /api/scenarios                    list of scenarios
   GET  /api/scenarios/<name>             scenario file list + previews
@@ -52,6 +56,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -61,7 +67,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from ..bundle import (
     BundleError,
@@ -83,13 +89,22 @@ from ..config import (
     write_default_config,
     write_starter_scenario,
 )
-from ..playbooks import PLAYBOOK_DIR, repo_playbook_dir
+from ..doctor import doctor_summary as _doctor_summary
+from ..doctor import run_doctor as _run_doctor
+from ..playbooks import PLAYBOOK_DIR, list_playbooks, repo_playbook_dir
+from ..runs import audit_rollup as _runs_audit_rollup
+from ..runs import count_runs as _runs_count_runs
+from ..runs import diff_deltas as _runs_diff_deltas
+from ..runs import iter_runs as _runs_iter_runs
+from ..runs import iteration_ai_calls as _runs_iteration_ai_calls
+from ..runs import show_run as _runs_show_run
 from ..schemas import SCHEMA_DIR
 from ..scenarios import (
     default_e2e_result,
     default_implementation_result,
     default_task_contract,
     dump_scenario_files,
+    list_scenarios,
     load_scenario_form,
     validate_scenario_form,
 )
@@ -187,6 +202,30 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _doctor_payload(repo: Path) -> dict[str, Any]:
+    """Shape ``dev-loop doctor`` results for the UI.
+
+    Same fields the CLI's ``--json`` mode emits, minus ``exit_code`` (a
+    process-level concept). If the probe itself crashes we surface a
+    single error-level check so the onboarding panel still renders.
+    """
+    try:
+        checks = _run_doctor(repo)
+    except Exception as e:  # noqa: BLE001
+        return {
+            "checks": [{
+                "level": "error",
+                "label": "doctor",
+                "message": f"diagnostics failed: {type(e).__name__}: {e}",
+            }],
+            "summary": {"ok": 0, "warning": 0, "error": 1},
+        }
+    return {
+        "checks": [c.to_dict() for c in checks],
+        "summary": _doctor_summary(checks),
+    }
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -251,6 +290,7 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
             if p == "/api/config": self._api_config(); return
             if p == "/api/config/raw": self._api_config_raw(); return
             if p == "/api/onboarding": self._api_onboarding(); return
+            if p == "/api/doctor": self._api_doctor(); return
             if p == "/api/runs": self._api_list_runs(); return
             if p == "/api/runs/trends": self._api_runs_trends(); return
             if p == "/api/scenarios": self._api_list_scenarios(); return
@@ -521,6 +561,7 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 },
             ]
             is_complete = all(s["done"] for s in steps)
+            diagnostics = _doctor_payload(repo)
             self._send_json(200, {
                 "repo": str(repo),
                 "repo_name": repo.name,
@@ -533,7 +574,12 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                 "default_provider": r.default_provider,
                 "is_complete": is_complete,
                 "steps": steps,
+                "diagnostics": diagnostics,
             })
+
+        def _api_doctor(self) -> None:
+            """Detailed setup diagnostics, mirroring ``dev-loop doctor``."""
+            self._send_json(200, _doctor_payload(repo))
 
         def _api_init(self, body: Any) -> None:
             """One-click setup. Idempotent.
@@ -656,31 +702,41 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
         def _api_list_runs(self) -> None:
             _, r = _resolved()
             runs_dir = r.runs_dir
+            limit, offset = _parse_page_args(urlparse(self.path).query)
+            total = _runs_count_runs(runs_dir)
             out: list[dict[str, Any]] = []
-            if runs_dir.exists():
-                for d in sorted(runs_dir.iterdir(), reverse=True):
-                    if not d.is_dir():
-                        continue
-                    tm = d / "task_manifest.json"
-                    if not tm.exists():
-                        continue
-                    try:
-                        data = read_json(tm)
-                    except Exception:
-                        continue
-                    tc = data.get("task_contract") or {}
-                    out.append({
-                        "task_id": data.get("task_id", d.name),
-                        "status": data.get("status"),
-                        "final_status": data.get("final_status"),
-                        "selected_iteration": data.get("selected_iteration"),
-                        "created_at_utc": data.get("created_at_utc"),
-                        "updated_at_utc": data.get("updated_at_utc"),
-                        "iterations": _count_iterations(d),
-                        "goal": tc.get("implementation_goal"),
-                        "duration_seconds": _run_duration_seconds(data),
-                    })
-            self._send_json(200, {"runs": out, "jobs": jobs.list()})
+            seen = 0
+            for entry in _runs_iter_runs(runs_dir):
+                if seen < offset:
+                    seen += 1
+                    continue
+                if limit is not None and len(out) >= limit:
+                    break
+                out.append({
+                    "task_id": entry.get("task_id"),
+                    "status": entry.get("status"),
+                    "final_status": entry.get("final_status"),
+                    "effective_status": entry.get("effective_status"),
+                    "interrupted": bool(entry.get("interrupted")),
+                    "selected_iteration": entry.get("selected_iteration"),
+                    "created_at_utc": entry.get("created_at_utc"),
+                    "updated_at_utc": entry.get("updated_at_utc"),
+                    "iterations": entry.get("iterations") or 0,
+                    "goal": entry.get("goal"),
+                    "duration_seconds": entry.get("duration_seconds"),
+                })
+                seen += 1
+            self._send_json(200, {
+                "runs": out,
+                "jobs": jobs.list(),
+                "pagination": {
+                    "limit": limit,
+                    "offset": offset,
+                    "returned": len(out),
+                    "total": total,
+                    "has_more": (offset + len(out)) < total,
+                },
+            })
 
         def _api_runs_trends(self) -> None:
             _, r = _resolved()
@@ -730,6 +786,13 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
                     a = int(parts[4])
                     self._send_json(200, _attempt_dump(iter_dir / "validations" / f"attempt-{a:03d}"))
                     return
+                if parts[3] == "ai_calls" and len(parts) == 4:
+                    self._send_json(200, _summarize_ai_calls(iter_dir)); return
+                if parts[3] == "ai_call" and len(parts) >= 5:
+                    self._send_json(200, _ai_call_dump(
+                        iter_dir / "ai_calls", unquote(parts[4]),
+                    ))
+                    return
             self._send_text(404, "not found")
 
         # ----- compare two runs --------------------------------------
@@ -758,18 +821,27 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
         def _api_list_scenarios(self) -> None:
             _, r = _resolved()
             sc_dir = r.scenarios_dir
+            # Lint/health summary comes from the same library call powering
+            # ``dev-loop scenarios ls`` so CLI and UI report identical state.
+            summaries = {s["name"]: s for s in list_scenarios(sc_dir)}
             out: list[dict[str, Any]] = []
             if sc_dir.exists():
                 for d in sorted(sc_dir.iterdir()):
                     if not d.is_dir():
                         continue
                     req = d / "task_request.md"
+                    summary = summaries.get(d.name, {})
                     out.append({
                         "name": d.name,
                         "path": str(d),
                         "files": sorted(f.name for f in d.iterdir() if f.is_file()),
                         "request_preview":
                             (req.read_text(encoding="utf-8")[:600] if req.exists() else None),
+                        "goal": summary.get("goal", ""),
+                        "e2e_status": summary.get("e2e_status"),
+                        "n_errors": summary.get("n_errors", 0),
+                        "n_warnings": summary.get("n_warnings", 0),
+                        "valid": summary.get("valid", True),
                     })
             self._send_json(200, {"scenarios": out, "scenarios_dir": str(sc_dir)})
 
@@ -933,36 +1005,16 @@ def _make_handler(*, repo: Path, jobs: _JobRegistry):
         # ----- capabilities, playbooks, schemas -----------------------
 
         def _api_list_capabilities(self) -> None:
-            from ..capabilities import load_default_registry
-            reg = load_default_registry()
-            specs = []
-            for name in reg.all_names():
-                s = reg.spec(name)
-                specs.append({
-                    "name": s.name,
-                    "category": s.category,
-                    "agent_requestable": s.agent_requestable,
-                    "timeout_seconds": s.timeout_seconds,
-                    "redacts_output": s.redacts_output,
-                    "audit": s.audit,
-                    "forced_params": s.forced_params,
-                })
-            self._send_json(200, {"capabilities": specs})
+            from ..capabilities import list_capabilities
+            self._send_json(200, {"capabilities": list_capabilities()})
 
         def _api_list_playbooks(self) -> None:
+            # Delegate to the shared helper so the UI picker and
+            # ``dev-loop playbooks ls`` see identical fields, including the
+            # agent-phase bindings and source label.
             override_dir = repo_playbook_dir(repo)
-            names: set[str] = set()
-            names.update(p.name for p in PLAYBOOK_DIR.glob("*.md"))
-            if override_dir.exists():
-                names.update(p.name for p in override_dir.glob("*.md"))
-            playbooks = []
-            for name in sorted(names):
-                playbooks.append({
-                    "name": name,
-                    "overridden": (override_dir / name).exists(),
-                })
             self._send_json(200, {
-                "playbooks": playbooks,
+                "playbooks": list_playbooks(repo=repo),
                 "override_dir": str(override_dir.relative_to(repo))
                                  if override_dir.is_relative_to(repo)
                                  else str(override_dir),
@@ -1341,8 +1393,188 @@ def _count_iterations(run_dir: Path) -> int:
     return sum(1 for d in iters.iterdir() if d.is_dir())
 
 
+def _parse_page_args(query: str) -> tuple[int | None, int]:
+    """Pull ``limit`` and ``offset`` from a URL query string.
+
+    Both are optional. Negative or non-numeric values are clamped to a
+    sensible default (``offset=0``, ``limit=None``) rather than raising
+    so a hand-edited URL can't 500 the listing endpoint. ``limit=0`` is
+    treated as "no cap" so callers can opt out of the page window when
+    they need the full ledger.
+    """
+    qs = parse_qs(query or "")
+
+    def _int(name: str, default: int | None) -> int | None:
+        raw = qs.get(name, [None])[0]
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
+
+    limit = _int("limit", None)
+    if limit is not None:
+        limit = max(0, limit)
+        if limit == 0:
+            limit = None
+    offset = _int("offset", 0) or 0
+    if offset < 0:
+        offset = 0
+    return limit, offset
+
+
+_RUN_SUMMARY_CACHE_LOCK = threading.Lock()
+_RUN_SUMMARY_CACHE: dict[tuple[str, str], tuple[Any, dict[str, Any] | None]] = {}
+
+
+def _clear_run_summary_cache() -> None:
+    """Drop the per-run show+audit memo. Tests call this between server
+    instances that share a ``runs_dir``; production relies on the
+    signature to catch all mutations."""
+    with _RUN_SUMMARY_CACHE_LOCK:
+        _RUN_SUMMARY_CACHE.clear()
+
+
+def _run_summary_signature(run_root: Path) -> Any:
+    """Stat-based fingerprint that changes iff the compare-shaped summary
+    for ``run_root`` would change.
+
+    ``show_run`` opens the task manifest plus every iteration's
+    ``manifest.json``, counts ``validations/`` subdirs, and walks each
+    iteration's ``ai_calls/`` directory. ``audit_rollup`` parses
+    ``capability_audit.jsonl`` line-by-line. Each of those inputs is
+    bumped by the orchestrator when its contents change, so stat'ing
+    them is sufficient — and ~100x cheaper than re-parsing.
+
+    Returns a hashable tuple. A missing run reports ``("missing",)``
+    so a not-yet-existing task id still memoises a single ``None``
+    until its directory appears.
+    """
+    tm = run_root / "task_manifest.json"
+    try:
+        tm_st = tm.stat()
+    except OSError:
+        return ("missing",)
+    audit_path = run_root / "capability_audit.jsonl"
+    try:
+        au_st = audit_path.stat()
+        audit_sig = (au_st.st_mtime_ns, au_st.st_size)
+    except OSError:
+        audit_sig = (0, 0)
+    iters_root = run_root / "iterations"
+    try:
+        iters_st = iters_root.stat()
+        iters_root_sig = iters_st.st_mtime_ns
+    except OSError:
+        iters_root_sig = 0
+    iter_entries: list[tuple[str, int, int, int, int, int]] = []
+    try:
+        scan = os.scandir(iters_root)
+    except OSError:
+        scan = None
+    if scan is not None:
+        with scan:
+            for de in scan:
+                if not de.is_dir(follow_symlinks=False):
+                    continue
+                im_mtime = 0
+                try:
+                    im_mtime = os.stat(
+                        os.path.join(de.path, "manifest.json"),
+                    ).st_mtime_ns
+                except OSError:
+                    pass
+                v_mtime = 0
+                v_count = 0
+                try:
+                    v_mtime = os.stat(
+                        os.path.join(de.path, "validations"),
+                    ).st_mtime_ns
+                    with os.scandir(
+                        os.path.join(de.path, "validations"),
+                    ) as vv:
+                        v_count = sum(
+                            1 for s in vv
+                            if s.is_dir(follow_symlinks=False)
+                        )
+                except OSError:
+                    pass
+                ai_mtime = 0
+                ai_count = 0
+                try:
+                    ai_mtime = os.stat(
+                        os.path.join(de.path, "ai_calls"),
+                    ).st_mtime_ns
+                    with os.scandir(
+                        os.path.join(de.path, "ai_calls"),
+                    ) as ai:
+                        ai_count = sum(
+                            1 for s in ai
+                            if s.is_dir(follow_symlinks=False)
+                        )
+                except OSError:
+                    pass
+                iter_entries.append(
+                    (de.name, im_mtime, v_mtime, v_count, ai_mtime, ai_count),
+                )
+    iter_entries.sort()
+    return (
+        (tm_st.st_mtime_ns, tm_st.st_size),
+        audit_sig,
+        iters_root_sig,
+        tuple(iter_entries),
+    )
+
+
+def _compute_run_summary_for_compare(runs_dir: Path,
+                                     task_id: str) -> dict[str, Any] | None:
+    canonical = _runs_show_run(runs_dir, task_id)
+    if canonical is None:
+        return None
+    iters: list[dict[str, Any]] = []
+    for it in canonical.get("iterations") or []:
+        summary = it.get("summary") or ""
+        iters.append({
+            "i": it.get("iteration"),
+            "final_e2e_status": it.get("final_e2e_status"),
+            "summary": summary[:240] if isinstance(summary, str) else "",
+            "changed_files": list(it.get("changed_files") or []),
+            "patch_hash": it.get("patch_hash"),
+            "attempts": it.get("attempts") or 0,
+        })
+    return {
+        "task_id": canonical.get("task_id"),
+        "status": canonical.get("status"),
+        "final_status": canonical.get("final_status"),
+        "stop_reason": canonical.get("stop_reason"),
+        "selected_iteration": canonical.get("selected_iteration"),
+        "created_at_utc": canonical.get("created_at_utc"),
+        "updated_at_utc": canonical.get("updated_at_utc"),
+        "duration_seconds": canonical.get("duration_seconds"),
+        "goal": canonical.get("goal"),
+        "scenario": canonical.get("scenario"),
+        "iteration_count": len(iters),
+        "iterations": iters,
+        "audit": _runs_audit_rollup(Path(canonical["path"])),
+    }
+
+
 def _summarize_run_for_compare(runs_dir: Path, task_id: str) -> dict[str, Any] | None:
     """Compact summary used by the cross-run compare view.
+
+    Thin adapter over :func:`harness.runs.show_run` + :func:`audit_rollup`
+    — the canonical ledger readers in ``harness.runs`` are the source of
+    truth for what a run looks like. We only project iteration fields
+    into the wire shape the UI client expects (``i`` instead of
+    ``iteration``, summary truncated to 240 chars, no ``error`` key) and
+    layer the audit rollup on top.
+
+    Memoised per-run on a stat-based signature (Iter 16 follow-up) so
+    repeated compare loads — picking the same A and swapping B, or
+    polling the same run while it streams — don't re-parse every
+    iteration manifest. Mirrors the trends cache pattern: cheap stat
+    calls catch any orchestrator mutation, no manual invalidation.
 
     Returns ``None`` when the run dir or manifest is missing so the
     endpoint can return a partial payload (missing-A or missing-B)
@@ -1350,140 +1582,30 @@ def _summarize_run_for_compare(runs_dir: Path, task_id: str) -> dict[str, Any] |
     stale share link from blanking the page.
     """
     run_root = runs_dir / task_id
-    tm_path = run_root / "task_manifest.json"
-    if not run_root.exists() or not tm_path.exists():
-        return None
-    try:
-        tm = read_json(tm_path)
-    except Exception:
-        return None
-    tc = tm.get("task_contract") or {}
-    iters: list[dict[str, Any]] = []
-    iters_dir = run_root / "iterations"
-    if iters_dir.exists():
-        for d in sorted(d for d in iters_dir.iterdir() if d.is_dir()):
-            im = _read_safe_json(d / "manifest.json")
-            if not isinstance(im, dict):
-                im = {}
-            code = (im.get("code") or {}) if isinstance(im.get("code"), dict) else {}
-            agent_out = im.get("agent_output") or {}
-            summary = ""
-            if isinstance(agent_out, dict):
-                summary = agent_out.get("summary") or ""
-            v = d / "validations"
-            attempt_count = (
-                sum(1 for x in v.iterdir() if x.is_dir())
-                if v.exists() else 0
-            )
-            # Iteration number is the trailing integer of ``iter-NNN``.
-            try:
-                n = int(d.name.rsplit("-", 1)[1])
-            except (IndexError, ValueError):
-                n = len(iters) + 1
-            iters.append({
-                "i": n,
-                "final_e2e_status": im.get("final_e2e_status"),
-                "summary": summary[:240] if isinstance(summary, str) else "",
-                "changed_files": list(code.get("changed_files") or []),
-                "patch_hash": code.get("patch_hash"),
-                "attempts": attempt_count,
-            })
+    key = (str(runs_dir), task_id)
+    sig = _run_summary_signature(run_root)
+    with _RUN_SUMMARY_CACHE_LOCK:
+        hit = _RUN_SUMMARY_CACHE.get(key)
+        if hit is not None and hit[0] == sig:
+            cached = hit[1]
+            return copy.deepcopy(cached) if cached is not None else None
 
-    # Audit roll-up — counts by status and a short list of capability
-    # names so the user can see at-a-glance which side did more work.
-    audit_path = run_root / "capability_audit.jsonl"
-    audit_by_status: dict[str, int] = {}
-    audit_by_capability: dict[str, int] = {}
-    audit_total = 0
-    if audit_path.exists():
-        for line in audit_path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                entry = json.loads(line)
-            except Exception:
-                continue
-            audit_total += 1
-            status = entry.get("status") or "?"
-            audit_by_status[status] = audit_by_status.get(status, 0) + 1
-            cap = entry.get("capability") or "?"
-            audit_by_capability[cap] = audit_by_capability.get(cap, 0) + 1
-
-    return {
-        "task_id": tm.get("task_id", task_id),
-        "status": tm.get("status"),
-        "final_status": tm.get("final_status"),
-        "stop_reason": tm.get("stop_reason"),
-        "selected_iteration": tm.get("selected_iteration"),
-        "created_at_utc": tm.get("created_at_utc"),
-        "updated_at_utc": tm.get("updated_at_utc"),
-        "duration_seconds": _run_duration_seconds(tm),
-        "goal": tc.get("implementation_goal"),
-        "scenario": tc.get("scenario") or tm.get("scenario"),
-        "iteration_count": len(iters),
-        "iterations": iters,
-        "audit": {
-            "total": audit_total,
-            "by_status": audit_by_status,
-            "by_capability": audit_by_capability,
-        },
-    }
+    payload = _compute_run_summary_for_compare(runs_dir, task_id)
+    with _RUN_SUMMARY_CACHE_LOCK:
+        _RUN_SUMMARY_CACHE[key] = (sig, payload)
+    return copy.deepcopy(payload) if payload is not None else None
 
 
 def _compare_deltas(a: dict[str, Any] | None,
                     b: dict[str, Any] | None) -> dict[str, Any]:
     """High-level summary of what changed from ``a`` to ``b``.
 
-    Pure function over the summary shape so we can keep the analysis
-    server-side (one source of truth) and the client just renders.
-    Every value is either a scalar or a small string so the payload
-    stays a flat dict friendly to React-less DOM building.
+    Delegates to :func:`harness.runs.diff_deltas` so CLI ``runs diff``
+    and the Analyze tab compare view stay in lock-step. Kept as a
+    module-level name because tests and any future surface importing it
+    should not need to know the implementation moved.
     """
-    if a is None or b is None:
-        return {"both_present": False}
-    # Iteration count delta (positive = b took more iterations).
-    di = (b["iteration_count"] or 0) - (a["iteration_count"] or 0)
-    # Duration delta in seconds (positive = b was slower).
-    da_s = a.get("duration_seconds")
-    db_s = b.get("duration_seconds")
-    dur_delta = (
-        (db_s or 0) - (da_s or 0) if (da_s is not None and db_s is not None) else None
-    )
-    # Per-index iteration status agreement.
-    n = min(a["iteration_count"], b["iteration_count"])
-    same_status = sum(
-        1 for i in range(n)
-        if a["iterations"][i]["final_e2e_status"]
-        == b["iterations"][i]["final_e2e_status"]
-    )
-    first_diverge: int | None = None
-    for i in range(n):
-        if (a["iterations"][i]["final_e2e_status"]
-                != b["iterations"][i]["final_e2e_status"]
-            or a["iterations"][i]["patch_hash"]
-                != b["iterations"][i]["patch_hash"]):
-            first_diverge = i + 1
-            break
-    # Files only touched on one side vs both.
-    files_a = {f for it in a["iterations"] for f in it["changed_files"]}
-    files_b = {f for it in b["iterations"] for f in it["changed_files"]}
-    return {
-        "both_present": True,
-        "same_goal": (a.get("goal") or "") == (b.get("goal") or ""),
-        "same_scenario": (a.get("scenario") or "") == (b.get("scenario") or ""),
-        "same_final_status": a.get("final_status") == b.get("final_status"),
-        "iteration_count_delta": di,
-        "duration_seconds_delta": dur_delta,
-        "iteration_status_agreement": same_status,
-        "iteration_status_compared": n,
-        "first_diverging_iteration": first_diverge,
-        "files_only_a": sorted(files_a - files_b),
-        "files_only_b": sorted(files_b - files_a),
-        "files_both": sorted(files_a & files_b),
-        "audit_total_delta": (
-            (b["audit"]["total"] or 0) - (a["audit"]["total"] or 0)
-        ),
-    }
+    return _runs_diff_deltas(a, b)
 
 
 def _trend_bucket_key(goal: str | None) -> str:
@@ -1562,13 +1684,94 @@ def _trend_bucket_stats(series: list[dict[str, Any]]) -> dict[str, Any]:
     return stats
 
 
+_TRENDS_CACHE_LOCK = threading.Lock()
+_TRENDS_CACHE: dict[str, tuple[Any, dict[str, Any]]] = {}
+
+
+def _clear_trends_cache() -> None:
+    """Drop the trends-bucketing memo. Tests call this between server
+    instances that share a ``runs_dir`` path; production never needs to
+    invalidate manually because the signature catches all mutations."""
+    with _TRENDS_CACHE_LOCK:
+        _TRENDS_CACHE.clear()
+
+
+def _trends_signature(runs_dir: Path) -> Any:
+    """Return a value that changes iff the trends payload would change.
+
+    The payload depends on (a) which run dirs exist, (b) each run's
+    ``task_manifest.json`` contents, and (c) the number of ``iter-NNN``
+    subdirectories under each run's ``iterations/``. We approximate (b)
+    and (c) with ``mtime_ns`` on the manifest file and the iterations
+    directory respectively — both are written by the orchestrator and
+    bump whenever their contents do. Stat calls are O(N) in the number
+    of runs but ~100x cheaper than parsing JSON, so this still beats
+    re-summarizing on every poll.
+    """
+    if not runs_dir.exists():
+        return ("missing", None)
+    try:
+        root_stat = runs_dir.stat()
+    except OSError:
+        return ("missing", None)
+    entries: list[tuple[str, int, int, int]] = []
+    try:
+        it = os.scandir(runs_dir)
+    except OSError:
+        return ("missing", None)
+    with it:
+        for de in it:
+            if not de.is_dir(follow_symlinks=False):
+                continue
+            tm_mtime = 0
+            try:
+                tm_mtime = os.stat(
+                    os.path.join(de.path, "task_manifest.json"),
+                ).st_mtime_ns
+            except OSError:
+                pass
+            iters_mtime = 0
+            iters_count = 0
+            try:
+                iters_st = os.stat(os.path.join(de.path, "iterations"))
+                iters_mtime = iters_st.st_mtime_ns
+                with os.scandir(os.path.join(de.path, "iterations")) as ii:
+                    iters_count = sum(
+                        1 for sub in ii if sub.is_dir(follow_symlinks=False)
+                    )
+            except OSError:
+                pass
+            entries.append((de.name, tm_mtime, iters_mtime, iters_count))
+    entries.sort()
+    return (root_stat.st_mtime_ns, tuple(entries))
+
+
 def _summarize_trends(runs_dir: Path) -> dict[str, Any]:
     """Group every run on disk by implementation goal and emit one
     bucket per goal with chronological series + stats. Single-run goals
     are returned too so the UI can show "run more to see trends"
     without doing a second probe. The ``ungrouped`` bucket collects
     runs with no goal — also useful to surface vs silently dropping.
+
+    Memoised on a cheap stat-based signature of ``runs_dir`` so repeated
+    polls from the Analyze tab don't re-walk and re-parse the full
+    ledger; busy repos with hundreds of runs would otherwise pay the
+    full O(N) cost on every refresh.
     """
+    key = str(runs_dir)
+    sig = _trends_signature(runs_dir)
+    with _TRENDS_CACHE_LOCK:
+        hit = _TRENDS_CACHE.get(key)
+        if hit is not None and hit[0] == sig:
+            return copy.deepcopy(hit[1])
+
+    payload = _compute_trends(runs_dir)
+    with _TRENDS_CACHE_LOCK:
+        _TRENDS_CACHE[key] = (sig, payload)
+        return copy.deepcopy(payload)
+
+
+def _compute_trends(runs_dir: Path) -> dict[str, Any]:
     buckets: dict[str, list[dict[str, Any]]] = {}
     ungrouped: list[dict[str, Any]] = []
     if runs_dir.exists():
@@ -1676,6 +1879,46 @@ def _attempt_dump(attempt_dir: Path) -> dict[str, Any]:
             except Exception:
                 files[rel] = "<binary>"
     return {"path": str(attempt_dir), "files": files}
+
+
+_AI_CALL_DIR_RE = re.compile(r"^\d{3}_[A-Za-z0-9_\-]+$")
+
+
+def _summarize_ai_calls(iter_dir: Path) -> dict[str, Any]:
+    """Compact list of every AI call recorded for one iteration.
+
+    Delegates to ``harness.runs.iteration_ai_calls`` so the Analyze tab
+    and the CLI ``runs show`` rollup line agree on the per-call shape
+    (Iter 10: one source of truth, mirroring the diff/compare refactor).
+    """
+    return {"calls": _runs_iteration_ai_calls(iter_dir)}
+
+
+def _ai_call_dump(ai_calls_dir: Path, name: str) -> dict[str, Any]:
+    """Full payload for one AI call: input, output, metadata, raw log.
+
+    Validated against ``_AI_CALL_DIR_RE`` so a clever ``name`` cannot
+    traverse out of the iteration's ``ai_calls/`` directory.
+    """
+    if not _AI_CALL_DIR_RE.match(name):
+        return {"_error": "invalid ai_call id"}
+    sub = ai_calls_dir / name
+    if not sub.exists() or not sub.is_dir():
+        return {"_error": "ai_call not found"}
+    raw_log_path = sub / "raw_provider_log.jsonl"
+    raw_log: str | None = None
+    if raw_log_path.exists():
+        try:
+            raw_log = raw_log_path.read_text(encoding="utf-8")
+        except Exception:
+            raw_log = "<binary>"
+    return {
+        "name": name,
+        "input": _read_safe_json(sub / "input.json") if (sub / "input.json").exists() else None,
+        "output": _read_safe_json(sub / "output.json") if (sub / "output.json").exists() else None,
+        "metadata": _read_safe_json(sub / "metadata.json") if (sub / "metadata.json").exists() else None,
+        "raw_provider_log": raw_log,
+    }
 
 
 def _run_job(
